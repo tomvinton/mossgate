@@ -1,0 +1,13 @@
+{
+  "contentrating": "Everyone",
+  "description": "Mossgate — a cozy isometric city that grows, thrives, or fades entirely on its own.",
+  "file": "index.html",
+  "general": {
+    "properties": {}
+  },
+  "preview": "preview.jpg",
+  "tags": ["Relaxing", "Artistic", "Nature"],
+  "title": "Mossgate",
+  "type": "web",
+  "visibility": "private"
+}
