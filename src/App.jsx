@@ -216,7 +216,7 @@ function Calibration({ onClose }) {
 // ── Main component ─────────────────────────────────────────────────────────────
 import { createWorld }              from './engine/world.js'
 import { tick }                     from './engine/tick.js'
-import { createCamera, updateCamera, panCamera } from './render/camera.js'
+import { createCamera, updateCamera, updateZoom, panCamera } from './render/camera.js'
 import { getNightProgress, makeStars }           from './engine/daynight.js'
 import { sortedTileKeys, tileToScreen, drawTile, drawBox, drawVillager, drawWoodPile, drawFoodSacks } from './render/iso.js'
 import { BUILDING_DEFS, TICK_MS }   from './engine/config.js'
@@ -282,6 +282,10 @@ export default function App() {
       const world  = worldRef.current
       const camera = cameraRef.current
 
+      // Zoom-to-fit: lerp toward the zoom that keeps all built buildings on screen
+      updateZoom(camera, W, H)
+      const zoom = camera.zoom
+
       // ── Cached sorted tile keys — computed once, tiles are never added/removed ─
       if (!sortedKeysRef.current) sortedKeysRef.current = sortedTileKeys(world.tiles)
       const keys = sortedKeysRef.current
@@ -290,8 +294,9 @@ export default function App() {
       // Invalidated when: bgDirty flag set (building/stump change) OR camera moved
       const bg    = bgCanvasRef.current
       const bgCtx = bg.getContext('2d')
-      const camMoved = Math.abs(camera.x - (bg._camX ?? camera.x + 1)) > 0.5 ||
-                       Math.abs(camera.y - (bg._camY ?? camera.y + 1)) > 0.5
+      const camMoved  = Math.abs(camera.x    - (bg._camX  ?? camera.x    + 1)) > 0.5 ||
+                        Math.abs(camera.y    - (bg._camY  ?? camera.y    + 1)) > 0.5 ||
+                        Math.abs(camera.zoom - (bg._zoom  ?? camera.zoom  + 1)) > 0.005
 
       if (world.bgDirty || camMoved || bg.width !== canvas.width || bg.height !== canvas.height) {
         // Match physical pixel dimensions
@@ -299,18 +304,29 @@ export default function App() {
           bg.width  = canvas.width
           bg.height = canvas.height
         }
+
+        // Background fill — full canvas, no zoom
         bgCtx.setTransform(dpr, 0, 0, dpr, 0, 0)
         bgCtx.fillStyle = '#1a2a12'
         bgCtx.fillRect(0, 0, W, H)
 
-        const builtAt = new Map()
+        // Zoom transform for tile drawing: scale around screen center
+        bgCtx.setTransform(
+          dpr * zoom, 0, 0, dpr * zoom,
+          dpr * W / 2 * (1 - zoom),
+          dpr * H / 2 * (1 - zoom)
+        )
+
+        const builtAt  = new Map()
         for (const b of world.buildings) if (b.isBuilt) builtAt.set(`${b.col},${b.row}`, b)
+        // Cull based on pre-zoom logical coords; widen margin for low zoom values
+        const viewPad = Math.max(200, W / Math.min(zoom, 1))
 
         for (const k of keys) {
           const [col, row] = k.split(',').map(Number)
           const tile = world.tiles.get(k)
           const { sx, sy } = tileToScreen(col, row, camera.x, camera.y, W, H)
-          if (sx < -100 || sx > W + 100 || sy < -100 || sy > H + 120) continue
+          if (sx < -viewPad || sx > W + viewPad || sy < -viewPad || sy > H + viewPad) continue
           drawTile(bgCtx, sx, sy, tile.type)
           const b = builtAt.get(k)
           if (b) {
@@ -321,12 +337,20 @@ export default function App() {
 
         bg._camX = camera.x
         bg._camY = camera.y
+        bg._zoom = camera.zoom
         world.bgDirty = false
       }
 
       // ── Composite frame ────────────────────────────────────────────────────────
+      // bg canvas has zoom baked in — draw at 1:1
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
       ctx.drawImage(bg, 0, 0, W, H)
+
+      // Zoom transform for world-space foreground elements
+      const zoomTx = dpr * zoom
+      const zoomEx = dpr * W / 2 * (1 - zoom)
+      const zoomEy = dpr * H / 2 * (1 - zoom)
+      ctx.setTransform(zoomTx, 0, 0, zoomTx, zoomEx, zoomEy)
 
       // Under-construction buildings — dynamic (animated progress bar)
       const underConstruction = world.buildings
@@ -344,12 +368,16 @@ export default function App() {
       drawFoodSacks(ctx, csx, csy, world.resources.food)
 
       // Citizens
+      const viewPadC = Math.max(80, 80 / Math.min(zoom, 1))
       const sorted = [...world.citizens].sort((a, b) => (a.x + a.y) - (b.x + b.y))
       for (const v of sorted) {
         const { sx, sy } = tileToScreen(v.x, v.y, camera.x, camera.y, W, H)
-        if (sx < -40 || sx > W + 40 || sy < -40 || sy > H + 40) continue
+        if (sx < -viewPadC || sx > W + viewPadC || sy < -viewPadC || sy > H + viewPadC) continue
         drawVillager(ctx, sx, sy, v)
       }
+
+      // Reset to no-zoom for full-screen overlays
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
 
       // ── Day / night ────────────────────────────────────────────────────────────
       const night = getNightProgress(world.tick)
@@ -387,15 +415,17 @@ export default function App() {
           ctx.restore()
         }
 
-        // Lantern glows — warm circles around completed buildings
+        // Lantern glows — world-space positions, need zoom transform
         if (night > 0.25) {
           const lanternAlpha = Math.min(1, (night - 0.25) / 0.3)
           ctx.save()
+          ctx.setTransform(zoomTx, 0, 0, zoomTx, zoomEx, zoomEy)
           ctx.globalCompositeOperation = 'screen'
+          const viewPadL = Math.max(100, 100 / Math.min(zoom, 1))
           for (const b of world.buildings) {
             if (!b.isBuilt) continue
             const { sx, sy } = tileToScreen(b.col, b.row, camera.x, camera.y, W, H)
-            if (sx < -60 || sx > W + 60 || sy < -60 || sy > H + 60) continue
+            if (sx < -viewPadL || sx > W + viewPadL || sy < -viewPadL || sy > H + viewPadL) continue
             const glow = ctx.createRadialGradient(sx, sy, 0, sx, sy, 38)
             glow.addColorStop(0, `rgba(255, 160, 40, ${0.30 * lanternAlpha})`)
             glow.addColorStop(0.4, `rgba(255, 100, 20, ${0.12 * lanternAlpha})`)
@@ -407,7 +437,8 @@ export default function App() {
         }
       }
 
-      // Vignette
+      // Vignette — full-screen, no zoom
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
       const vg = ctx.createRadialGradient(W/2, H/2, H*0.2, W/2, H/2, H*0.85)
       vg.addColorStop(0, 'rgba(0,0,0,0)')
       vg.addColorStop(1, 'rgba(0,0,0,0.55)')
@@ -426,11 +457,13 @@ export default function App() {
       const camera = cameraRef.current
       const world  = worldRef.current
       const TW2 = 32, TH2 = 16
+      const zoom = camera.zoom || 1
 
-      // Inverse isometric transform: screen → world tile coords
-      // Forward: sx = (col-row)*TW2 - camX + W/2,  sy = (col+row)*TH2 - camY + H/2
-      const a    = (clientX - W / 2 + camera.x) / TW2   // col - row
-      const b    = (clientY - H / 2 + camera.y) / TH2   // col + row
+      // Inverse isometric transform accounting for zoom:
+      // Forward: sx = ((col-row)*TW2 - camX) * zoom + W/2
+      // Inverse: (col-row) = ((screenX - W/2) / zoom + camX) / TW2
+      const a    = ((clientX - W / 2) / zoom + camera.x) / TW2   // col - row
+      const b    = ((clientY - H / 2) / zoom + camera.y) / TH2   // col + row
       const wCol = (a + b) / 2
       const wRow = (b - a) / 2
 

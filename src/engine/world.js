@@ -129,16 +129,6 @@ export function createWorld() {
   }
 }
 
-// ── Dynamic house cost ─────────────────────────────────────────────────────────
-// First house = 5 wood, each subsequent one costs 5 more.
-// Starter houses (3 pre-built at world start) don't count toward the progression.
-
-export function getHouseCost(world) {
-  const totalBuilt  = world.buildings.filter(b => b.type === 'house' && b.isBuilt).length
-  const constructed = Math.max(0, totalBuilt - 3)   // ignore the 3 starter houses
-  return (constructed + 1) * 5                       // 5, 10, 15, 20, …
-}
-
 // ── Utility helpers ────────────────────────────────────────────────────────────
 
 export function getBuilder(world) {

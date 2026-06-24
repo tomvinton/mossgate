@@ -1,7 +1,7 @@
 // ── Mossgate — Needs, Deficits, Unlocks, Build Decisions ─────────────────────
 
 import { UNLOCK_CONDITIONS, BUILDING_DEFS, FOOD_PER_CITIZEN, FOOD_CONSUME_EVERY } from './config.js'
-import { hasBuilt, addEvent, key, unkey, getHouseCost } from './world.js'
+import { hasBuilt, addEvent, key, unkey } from './world.js'
 
 // ── Food consumption ───────────────────────────────────────────────────────────
 
@@ -49,12 +49,11 @@ export function updateBuildQueue(world) {
   }
 
   // Priority 1: Housing — if population is at or near housing cap
-  const houseCost = getHouseCost(world)
-  if (headroom <= 1 && world.unlocks.has('house') && wood >= houseCost) {
+  if (headroom <= 1 && world.unlocks.has('house') && wood >= BUILDING_DEFS.house.cost.wood) {
     const site = findBuildSite(world, 'house')
     if (site) {
-      world.buildQueue.push({ type: 'house', ...site, cost: { wood: houseCost } })
-      addEvent(world, `Builder planning a house (${houseCost} wood)`)
+      world.buildQueue.push({ type: 'house', ...site })
+      addEvent(world, 'Builder planning a house')
       return
     }
   }
@@ -90,12 +89,11 @@ export function updateBuildQueue(world) {
   }
 
   // Priority 5: Additional houses if growing
-  const houseCost2 = getHouseCost(world)
-  if (headroom <= 2 && world.unlocks.has('house') && wood >= houseCost2) {
+  if (headroom <= 2 && world.unlocks.has('house') && wood >= BUILDING_DEFS.house.cost.wood) {
     const site = findBuildSite(world, 'house')
     if (site) {
-      world.buildQueue.push({ type: 'house', ...site, cost: { wood: houseCost2 } })
-      addEvent(world, `Builder planning a house (${houseCost2} wood)`)
+      world.buildQueue.push({ type: 'house', ...site })
+      addEvent(world, 'Builder planning a house')
     }
   }
 }
