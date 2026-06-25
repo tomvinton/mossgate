@@ -214,24 +214,25 @@ function Calibration({ onClose }) {
 }
 
 // ── Main component ─────────────────────────────────────────────────────────────
-import { createWorld }              from './engine/world.js'
+import { createWorld, revealAround } from './engine/world.js'
 import { tick }                     from './engine/tick.js'
 import { createCamera, updateCamera, updateZoom, panCamera } from './render/camera.js'
 import { getNightProgress, makeStars }           from './engine/daynight.js'
-import { sortedTileKeys, tileToScreen, drawTile, drawBox, drawVillager, drawWoodPile, drawFoodSacks } from './render/iso.js'
+import { tileToScreen, drawTile, drawBox, drawVillager, drawWoodPile, drawFoodSacks } from './render/iso.js'
 import { BUILDING_DEFS, TICK_MS }   from './engine/config.js'
 
 export default function App() {
   const canvasRef     = useRef(null)
   const bgCanvasRef   = useRef(null)    // offscreen canvas — tiles + built buildings
-  const sortedKeysRef = useRef(null)    // cached sorted tile key array (never changes)
-  const dprRef        = useRef(1)
+  const sortedKeysRef  = useRef(null)    // revealed tiles sorted for painter's algorithm
+  const lastRevealRef  = useRef({ x: null, y: null, zoom: null })
+  const dprRef         = useRef(1)
   const worldRef      = useRef(null)
   const cameraRef     = useRef(null)
   const dragRef       = useRef(null)    // { id, x, y, startX, startY, t, moved }
   const starsRef      = useRef(makeStars())
-  const speedRef      = useRef(1)
-  const [speed, setSpeed]       = useState(1)
+  const speedRef      = useRef(20)
+  const [speed, setSpeed]       = useState(20)
   const [cal, setCal]           = useState(false)
   const [selected, setSelected] = useState(null)  // { type, data } snapshot
 
@@ -286,8 +287,35 @@ export default function App() {
       updateZoom(camera, W, H)
       const zoom = camera.zoom
 
-      // ── Cached sorted tile keys — computed once, tiles are never added/removed ─
-      if (!sortedKeysRef.current) sortedKeysRef.current = sortedTileKeys(world.tiles)
+      // ── Viewport-driven tile generation — ensures the world extends beyond view ──
+      // Convert camera world-coords to tile-coords (inverse of tileToScreen at center)
+      {
+        const TW2 = 32, TH2 = 16   // TILE_W/2, TILE_H/2
+        const camCol = Math.round((camera.x / TW2 + camera.y / TH2) / 2)
+        const camRow = Math.round((camera.y / TH2 - camera.x / TW2) / 2)
+        const lr     = lastRevealRef.current
+        const moved  = lr.x == null ||
+          Math.abs(camCol - lr.x) > 4 ||
+          Math.abs(camRow - lr.y) > 4 ||
+          Math.abs(zoom  - lr.zoom) > 0.08
+        if (moved) {
+          // Radius that covers the visible viewport plus a generous offscreen buffer
+          const viewRadius = Math.ceil(Math.max(W, H) / (64 * zoom)) + 12
+          revealAround(world, camCol, camRow, viewRadius)
+          lr.x = camCol; lr.y = camRow; lr.zoom = zoom
+        }
+      }
+
+      // ── Sorted revealed tile keys — re-sorted whenever new tiles are revealed ──
+      const revCount = world.revealedTiles.size
+      if (!sortedKeysRef.current || sortedKeysRef.current.length !== revCount) {
+        sortedKeysRef.current = [...world.revealedTiles].sort((a, b) => {
+          const [ac, ar] = a.split(',').map(Number)
+          const [bc, br] = b.split(',').map(Number)
+          const da = ac + ar, db = bc + br
+          return da !== db ? da - db : ac - bc
+        })
+      }
       const keys = sortedKeysRef.current
 
       // ── Background canvas — tiles + BUILT buildings ────────────────────────────

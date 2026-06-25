@@ -3,13 +3,44 @@
 // (forage / chop / build) based on what the settlement needs most.
 // Specialised roles (farmer, logger, guard, …) come in a later phase.
 
-import { TASKS, BUILDING_DEFS, ARRIVE_MIN_TICKS, ARRIVE_MAX_TICKS } from './config.js'
-import { key, makeCitizen, addEvent } from './world.js'
+import { TASKS, BUILDING_DEFS, ARRIVE_MIN_TICKS, ARRIVE_MAX_TICKS, REVEAL_RADIUS } from './config.js'
+import { key, makeCitizen, addEvent, revealAround } from './world.js'
 import { getNightProgress } from './daynight.js'
 
 const MOVE_SPEED  = 0.035   // tiles per tick
 const STOCKPILE   = { x: 0, y: 0 }
 const ARRIVE_DIST = 0.15
+
+// ── Farmland expansion ─────────────────────────────────────────────────────────
+// When a farm is completed, flood-fill up to 8 adjacent grass tiles as farmland.
+
+const MAX_FARMLAND = 8
+
+function expandFarmland(world, farm) {
+  const occupied = new Set(world.buildings.map(b => `${b.col},${b.row}`))
+  const queue    = [[farm.col, farm.row]]
+  const visited  = new Set([`${farm.col},${farm.row}`])
+  let   count    = 0
+
+  while (queue.length > 0 && count < MAX_FARMLAND) {
+    const [c, r] = queue.shift()
+    for (const [nc, nr] of [[c+1,r],[c-1,r],[c,r+1],[c,r-1]]) {
+      if (count >= MAX_FARMLAND) break
+      const k    = `${nc},${nr}`
+      if (visited.has(k)) continue
+      visited.add(k)
+      const tile = world.tiles.get(k)
+      if (!tile || occupied.has(k)) continue
+      if (tile.type === 'grass' || tile.type === 'stump') {
+        tile.type = 'farmland'
+        delete tile.decayAt
+        count++
+        queue.push([nc, nr])
+      }
+    }
+  }
+  if (count > 0) world.bgDirty = true
+}
 
 // ── Road laying ────────────────────────────────────────────────────────────────
 // Traces a diagonal path from a building toward the world center (0,0),
@@ -26,6 +57,7 @@ function layRoadToCenter(world, fromCol, fromRow) {
     c += dc; r += dr
     const tile = world.tiles.get(key(c, r))
     if (tile) { tile.type = 'path'; delete tile.decayAt; changed = true }
+    revealAround(world, c, r, 3)   // reveal a corridor along the road
   }
   if (changed) world.bgDirty = true
 }
@@ -60,6 +92,7 @@ function nearestForestTile(world, cx, cy, excludeId) {
   const claimed = claimedTiles(world, excludeId)
   let best = null, bestDist = Infinity
   for (const [k, t] of world.tiles) {
+    if (!world.revealedTiles.has(k)) continue
     if (t.type !== 'forest') continue
     if (claimed.has(k)) continue
     const [c, r] = k.split(',').map(Number)
@@ -104,8 +137,7 @@ function tryGoHome(citizen, world) {
 function pickResourceTask(world) {
   const food = world.resources.food
   const wood = world.resources.wood
-  const pop  = world.citizens.length
-  if (world.deficits.food > 0 || food < pop) return 'forage'
+  // Food system disabled — workers chop wood unless surplus is needed
   if (wood < 25) return 'chop'
   return food <= wood ? 'forage' : 'chop'
 }
@@ -271,6 +303,8 @@ function updateWorker(citizen, world) {
         addEvent(world, `${def?.label || bld.type} completed`)
         world.newBuilding = { col: bld.col, row: bld.row }
         world.bgDirty     = true   // building is now in the bg layer
+        revealAround(world, bld.col, bld.row, REVEAL_RADIUS)
+        if (bld.type === 'farm') expandFarmland(world, bld)
         layRoadToCenter(world, bld.col, bld.row)
 
         citizen.buildTarget = null

@@ -88,14 +88,16 @@ export const ARRIVE_MAX_TICKS = 18_000
 
 // ── Tile types ─────────────────────────────────────────────────────────────────
 export const GROUND = {
-  grass:  '#3a5c28',
-  forest: '#1a3810',
-  stump:  '#5a4828',
-  path:   '#8a7a60',
-  plaza:  '#9a8a70',
+  grass:    '#3a5c28',
+  forest:   '#1a3810',
+  stump:    '#5a4828',
+  path:     '#8a7a60',
+  plaza:    '#9a8a70',
+  farmland: '#7a5530',
 }
 
 export const STUMP_DECAY_TICKS = 600   // ticks before stump becomes grass
+export const REVEAL_RADIUS     = 10   // tiles revealed around each completed building
 
 // ── Day / Night cycle ──────────────────────────────────────────────────────────
 // 20 ticks/sec → 20 min day = 24 000 ticks, 10 min night = 12 000 ticks

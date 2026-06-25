@@ -47,9 +47,35 @@ export function drawTile(ctx, sx, sy, type) {
     drawForestTile(ctx, sx, sy)
   } else if (type === 'stump') {
     drawStumpTile(ctx, sx, sy)
+  } else if (type === 'farmland') {
+    drawFarmlandTile(ctx, sx, sy)
   } else {
     diamond(ctx, sx, sy, GROUND[type] || GROUND.grass)
   }
+}
+
+function drawFarmlandTile(ctx, sx, sy) {
+  // Tilled soil base
+  diamond(ctx, sx, sy, '#7a5530', 'rgba(0,0,0,0.2)')
+
+  // Crop rows — clip to diamond, draw horizontal stripes
+  ctx.save()
+  ctx.beginPath()
+  ctx.moveTo(sx,       sy)
+  ctx.lineTo(sx + TW2, sy + TH2)
+  ctx.lineTo(sx,       sy + TILE_H)
+  ctx.lineTo(sx - TW2, sy + TH2)
+  ctx.closePath()
+  ctx.clip()
+  ctx.strokeStyle = '#5a3a18'
+  ctx.lineWidth   = 0.9
+  for (let i = 2; i < TILE_H; i += 5) {
+    ctx.beginPath()
+    ctx.moveTo(sx - TW2 - 4, sy + i)
+    ctx.lineTo(sx + TW2 + 4, sy + i)
+    ctx.stroke()
+  }
+  ctx.restore()
 }
 
 function drawForestTile(ctx, sx, sy) {

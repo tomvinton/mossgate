@@ -14,7 +14,7 @@ export function createCamera() {
     zoom:   2.0,    // current zoom (starts close-up)
     tz:     2.0,    // target zoom
     ease:   0.04,   // pan lerp speed per tick
-    zEase:  0.025,  // zoom lerp speed per render frame
+    zEase:  0.04,   // zoom lerp speed per render frame
     // Bounds set each tick from built building extents; consumed by updateZoom in draw loop
     _boundsW: 0,
     _boundsH: 0,
@@ -43,9 +43,9 @@ export function updateCamera(camera, world) {
     camera.tx = sumX / built.length
     camera.ty = sumY / built.length
 
-    // Bounds with generous padding so city isn't clipped at edges
-    camera._boundsW = (maxX - minX) + TILE_W * 8
-    camera._boundsH = (maxY - minY) + TILE_H * 14
+    // Bounds with moderate padding — tight enough that city fills the view
+    camera._boundsW = (maxX - minX) + TILE_W * 4
+    camera._boundsH = (maxY - minY) + TILE_H * 6
   }
 
   // Lerp pan position toward target
@@ -61,7 +61,7 @@ export function updateZoom(camera, W, H) {
       H / camera._boundsH,
       2.0    // never zoom in beyond 2× starting scale
     )
-    camera.tz = Math.max(0.3, targetZoom)
+    camera.tz = Math.max(0.15, targetZoom)
   }
   camera.zoom += (camera.tz - camera.zoom) * camera.zEase
 }

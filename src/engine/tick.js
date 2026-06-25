@@ -1,19 +1,14 @@
 // ── Mossgate — Master Tick ─────────────────────────────────────────────────────
 
-import { FOOD_CONSUME_EVERY, STUMP_DECAY_TICKS } from './config.js'
+import { STUMP_DECAY_TICKS } from './config.js'
 import { updateCitizens, spawnNewCitizen } from './citizens.js'
-import { consumeFood, checkUnlocks, updateBuildQueue } from './needs.js'
+import { checkUnlocks, updateBuildQueue } from './needs.js'
 
 export function tick(world) {
   world.tick++
 
   // Update all citizens
   updateCitizens(world)
-
-  // Food consumption (every N ticks)
-  if (world.tick % FOOD_CONSUME_EVERY === 0) {
-    consumeFood(world)
-  }
 
   // Stump decay → grass
   for (const [k, t] of world.tiles) {

@@ -3,28 +3,33 @@
 export const key   = (c, r) => `${c},${r}`
 export const unkey = (k)    => k.split(',').map(Number)
 
-// ── Map generation — forested area with a central clearing ────────────────────
+// ── Infinite procedural tile generation ───────────────────────────────────────
+// Deterministic hash — same (col, row, seed) always produces the same tile type.
 
-function generateMap() {
+function hashTile(col, row, seed) {
+  const n = Math.sin(col * 127.1 + row * 311.7 + seed * 74.3) * 43758.5453123
+  return n - Math.floor(n)
+}
+
+export function generateTileType(col, row, seed) {
+  if (Math.abs(col) <= 3 && Math.abs(row) <= 3) return 'grass'  // central clearing
+  const rand    = hashTile(col, row, seed)
+  const dist    = Math.sqrt(col * col + row * row)
+  const density = Math.max(0.50, 0.82 - dist * 0.002)   // forest thins slightly with distance
+  return rand < density ? 'forest' : 'grass'
+}
+
+// Initialise a small seed tile set just for the starter setup (roads, houses).
+// Everything beyond this area is generated on demand by revealAround.
+function initTiles(seed) {
   const tiles = new Map()
-  const RADIUS = 28
-
-  for (let c = -RADIUS; c <= RADIUS; c++) {
-    for (let r = -RADIUS; r <= RADIUS; r++) {
-      const dist = Math.sqrt(c * c + r * r)
-      if (dist > RADIUS) continue
-
-      const inClearing = Math.abs(c) <= 3 && Math.abs(r) <= 3
-      if (inClearing) {
-        tiles.set(key(c, r), { type: 'grass' })
-      } else {
-        // Dense forest — vary coverage slightly for natural look
-        const density = 0.82 - dist * 0.006
-        tiles.set(key(c, r), { type: Math.random() < density ? 'forest' : 'grass' })
-      }
+  const INIT_R = 8
+  for (let c = -INIT_R; c <= INIT_R; c++) {
+    for (let r = -INIT_R; r <= INIT_R; r++) {
+      if (Math.sqrt(c * c + r * r) > INIT_R) continue
+      tiles.set(key(c, r), { type: generateTileType(c, r, seed) })
     }
   }
-
   return tiles
 }
 
@@ -56,7 +61,8 @@ export function makeCitizen(_job, x, y, state = 'idle') {
 
 export function createWorld() {
   _nextId = 0
-  const tiles = generateMap()
+  const seed  = Math.random() * 99999
+  const tiles = initTiles(seed)
 
   // ── Starter houses — 3 small huts, one per founding citizen ─────────────────
   // Placed at the corners of the grass clearing, shelter:1 each (personal huts)
@@ -92,8 +98,9 @@ export function createWorld() {
 
   const citizens = [forager, woodcutter, builder]
 
-  return {
+  const world = {
     tiles,
+    seed,
     buildings,
     citizens,
 
@@ -126,7 +133,41 @@ export function createWorld() {
 
     // Renderer hint — set true whenever background canvas needs a full redraw
     bgDirty: true,
+
+    // Fog of war — Set of tile keys visible to the player
+    revealedTiles: new Set(),
   }
+
+  // Seed initial fog reveal from starter buildings and center stockpile
+  for (const b of buildings) revealAround(world, b.col, b.row, 12)
+  revealAround(world, 0, 0, 8)
+
+  return world
+}
+
+// ── Fog of war + infinite world ────────────────────────────────────────────────
+// Marks all tiles within `radius` of (col, row) as revealed.
+// Any tile not yet in world.tiles is generated on demand via the seeded hash.
+
+export function revealAround(world, col, row, radius) {
+  const r = Math.ceil(radius)
+  let changed = false
+  for (let dc = -r; dc <= r; dc++) {
+    for (let dr = -r; dr <= r; dr++) {
+      if (dc * dc + dr * dr > radius * radius) continue
+      const c = col + dc, ro = row + dr
+      const k = key(c, ro)
+      // Generate tile on demand if not yet in the world
+      if (!world.tiles.has(k)) {
+        world.tiles.set(k, { type: generateTileType(c, ro, world.seed) })
+      }
+      if (!world.revealedTiles.has(k)) {
+        world.revealedTiles.add(k)
+        changed = true
+      }
+    }
+  }
+  if (changed) world.bgDirty = true
 }
 
 // ── Utility helpers ────────────────────────────────────────────────────────────

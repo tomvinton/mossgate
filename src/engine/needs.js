@@ -107,6 +107,7 @@ function findBuildSite(world, type) {
   let best = null, bestScore = Infinity
 
   for (const [k, t] of world.tiles) {
+    if (!world.revealedTiles.has(k)) continue
     if (t.type !== 'grass' && t.type !== 'stump') continue
     if (occupied.has(k)) continue
 
@@ -117,6 +118,14 @@ function findBuildSite(world, type) {
     const score = type === 'farm'
       ? Math.abs(dist - 8)   // farms like to be ~8 tiles from center
       : dist                 // everything else as close to center as possible
+
+    // Houses: require at least 3 tiles of breathing room from any built building
+    if (type === 'house') {
+      const tooClose = world.buildings.some(b =>
+        b.isBuilt && Math.sqrt((b.col - c) ** 2 + (b.row - r) ** 2) < 3
+      )
+      if (tooClose) continue
+    }
 
     // Must have at least one grass neighbor (adjacent to developed area)
     const hasGrassNeighbor = [
