@@ -218,23 +218,55 @@ import { createWorld, revealAround } from './engine/world.js'
 import { tick }                     from './engine/tick.js'
 import { createCamera, updateCamera, updateZoom, panCamera } from './render/camera.js'
 import { getNightProgress, makeStars }           from './engine/daynight.js'
-import { tileToScreen, drawTile, drawBox, drawVillager, drawWoodPile, drawFoodSacks } from './render/iso.js'
-import { BUILDING_DEFS, TICK_MS }   from './engine/config.js'
+import { tileToScreen, drawTile, drawBox, drawVillager, drawWoodPile, drawFoodSacks, drawHeart } from './render/iso.js'
+import { BUILDING_DEFS, TICK_MS, ERA_DEFS, TILE_H, CYCLE_TICKS, DAY_TICKS, NIGHT_TICKS, DUSK_TICKS } from './engine/config.js'
+import { fireRandomEvent } from './engine/events.js'
 
 export default function App() {
   const canvasRef     = useRef(null)
   const bgCanvasRef   = useRef(null)    // offscreen canvas — tiles + built buildings
   const sortedKeysRef  = useRef(null)    // revealed tiles sorted for painter's algorithm
   const lastRevealRef  = useRef({ x: null, y: null, zoom: null })
+  const fuelBarRef     = useRef(null)    // DOM ref — updated each frame, no re-render
+  const eraLabelRef    = useRef(null)
+  const resourcesRef   = useRef(null)    // DOM ref — resource counts
+  const crisisRef      = useRef(null)    // DOM ref — fuel crisis warning
+  const eventsLogRef   = useRef(null)    // DOM ref — scrolling events log
+  const flashRef       = useRef(null)    // DOM ref — nuclear meltdown flash overlay
   const dprRef         = useRef(1)
   const worldRef      = useRef(null)
   const cameraRef     = useRef(null)
   const dragRef       = useRef(null)    // { id, x, y, startX, startY, t, moved }
-  const starsRef      = useRef(makeStars())
-  const speedRef      = useRef(20)
-  const [speed, setSpeed]       = useState(20)
+  const starsRef        = useRef(makeStars())
+  const speedRef        = useRef(1)
+  const speedAccRef     = useRef(0)
+  const devKeyTimesRef  = useRef([])
+  const fuelTapRef      = useRef({ count: 0, last: 0 })
+  const timeLabelRef    = useRef(null)
+  const [speed, setSpeed]       = useState(1)
+  const [devMenu, setDevMenu]   = useState(false)
   const [cal, setCal]           = useState(false)
   const [selected, setSelected] = useState(null)  // { type, data } snapshot
+
+  // ── Dev menu actions (refs are stable, safe to call from JSX handlers) ────────
+  const handleFuelTap = () => {
+    const now = Date.now()
+    const ft  = fuelTapRef.current
+    if (now - ft.last > 1500) ft.count = 0   // reset if too slow
+    ft.last = now
+    ft.count++
+    if (ft.count >= 5) { ft.count = 0; setDevMenu(v => !v) }
+  }
+
+  const jumpToEra = (era) => {
+    const w = worldRef.current; if (!w) return
+    const def = ERA_DEFS[era]
+    w.era = era; w.heart.era = era
+    w.heart.fuelMax = def.fuelMax; w.heart.fuelTank = def.fuelMax
+    w.heart.lightRadius = def.lightRadius; w.collapseTimer = 0; w.bgDirty = true
+  }
+  const forceEvent    = () => { if (worldRef.current) fireRandomEvent(worldRef.current) }
+  const forceCollapse = () => { if (worldRef.current) worldRef.current.collapsed = true }
 
   useEffect(() => {
     const world  = createWorld()
@@ -262,9 +294,37 @@ export default function App() {
 
     // ── Simulation loop ───────────────────────────────────────────────────────
     const simInterval = setInterval(() => {
-      const reps = speedRef.current
+      speedAccRef.current += speedRef.current
+      const reps = Math.floor(speedAccRef.current)
+      speedAccRef.current -= reps
       for (let i = 0; i < reps; i++) tick(worldRef.current)
       updateCamera(cameraRef.current, worldRef.current)
+
+      // ── Collapse check ─────────────────────────────────────────────────────
+      const w = worldRef.current
+      if (w.collapsed || w.nuclearCollapse) {
+        const wasNuclear = w.nuclearCollapse
+        const prevReveal = w.nuclearRevealed || wasNuclear
+
+        if (wasNuclear && flashRef.current) {
+          // Nuclear flash: white flare then fade over 2 seconds
+          flashRef.current.style.transition = 'none'
+          flashRef.current.style.opacity    = '1'
+          setTimeout(() => {
+            if (flashRef.current) {
+              flashRef.current.style.transition = 'opacity 2s ease'
+              flashRef.current.style.opacity    = '0'
+            }
+          }, 200)
+        }
+
+        const newWorld = createWorld({ nuclearRevealed: prevReveal })
+        worldRef.current  = newWorld
+        sortedKeysRef.current = null
+        lastRevealRef.current = { x: null, y: null, zoom: null }
+        cameraRef.current.x = 0
+        cameraRef.current.y = 0
+      }
     }, TICK_MS)
 
     // ── Render loop ───────────────────────────────────────────────────────────
@@ -390,10 +450,14 @@ export default function App() {
         if (def) drawBox(ctx, sx, sy, def, b.buildProgress)
       }
 
-      // Resource stockpile at center tile
+      // Resource stockpile at center tile (offset left; heart occupies center)
       const { sx: csx, sy: csy } = tileToScreen(0, 0, camera.x, camera.y, W, H)
       drawWoodPile(ctx, csx, csy, world.resources.wood)
       drawFoodSacks(ctx, csx, csy, world.resources.food)
+
+      // Heart — campfire (Era 1) drawn on top of the nuclear ruin tile
+      const fuelFrac = world.heart.fuelTank / world.heart.fuelMax
+      drawHeart(ctx, csx, csy, world.heart.era, fuelFrac)
 
       // Citizens
       const viewPadC = Math.max(80, 80 / Math.min(zoom, 1))
@@ -406,6 +470,79 @@ export default function App() {
 
       // Reset to no-zoom for full-screen overlays
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+
+      // ── Light radius — radial darkness from heart outward ──────────────────────
+      // Heart tile (0,0) screen position after zoom transform
+      const hsx = csx * zoom + W / 2 * (1 - zoom)
+      const hsy = (csy + TILE_H / 2) * zoom + H / 2 * (1 - zoom)
+      const lightPx = world.heart.lightRadius * 32 * zoom
+
+      // Era light color tint — warm glow inside lit radius
+      const [lr, lg, lb] = ERA_DEFS[world.heart.era].lightColor
+      const tint = ctx.createRadialGradient(hsx, hsy, 0, hsx, hsy, lightPx * 0.9)
+      tint.addColorStop(0,   `rgba(${lr},${lg},${lb},0.20)`)
+      tint.addColorStop(0.5, `rgba(${lr},${lg},${lb},0.06)`)
+      tint.addColorStop(1,   'rgba(0,0,0,0)')
+      ctx.fillStyle = tint
+      ctx.fillRect(0, 0, W, H)
+
+      // Outer darkness — tiles beyond light radius fade to black
+      const dark = ctx.createRadialGradient(hsx, hsy, lightPx * 0.55, hsx, hsy, lightPx * 1.35)
+      dark.addColorStop(0, 'rgba(0,0,0,0)')
+      dark.addColorStop(0.6, 'rgba(0,0,0,0.15)')
+      dark.addColorStop(1,   'rgba(0,0,0,0.96)')
+      ctx.fillStyle = dark
+      ctx.fillRect(0, 0, W, H)
+
+      // HUD update — direct DOM, no React re-render
+      if (fuelBarRef.current) {
+        const pct = Math.round(fuelFrac * 100)
+        fuelBarRef.current.style.width = `${pct}%`
+        fuelBarRef.current.style.background = pct > 60 ? '#ff9930' : pct > 30 ? '#ffcc44' : '#ff4444'
+      }
+      if (eraLabelRef.current) eraLabelRef.current.textContent = ERA_DEFS[world.heart.era].name
+      if (timeLabelRef.current) {
+        const cp  = ((world.tick % CYCLE_TICKS) + CYCLE_TICKS) % CYCLE_TICKS
+        const day = (world.day || 0) + 1
+        const phase = cp < DAY_TICKS - DUSK_TICKS ? 'Day'
+                    : cp < DAY_TICKS              ? 'Dusk'
+                    : cp < DAY_TICKS + NIGHT_TICKS - DUSK_TICKS ? 'Night'
+                    : 'Dawn'
+        timeLabelRef.current.textContent = `Day ${day} · ${phase}`
+      }
+      if (resourcesRef.current) {
+        const r    = world.resources
+        const era  = world.era
+        const f    = v => Math.floor(v || 0)
+        const lines = [`🍎 ${f(r.food)}  🪵 ${f(r.wood)}  🪨 ${f(r.stone)}`]
+        if (era >= 2)  lines.push(`📦 ${f(r.planks)} planks  🧱 ${f(r.cut_stone)} stone`)
+        if (era >= 3)  lines.push(`🪨 ${f(r.coal)} coal  🔩 ${f(r.iron_ore)} ore  ⚙️ ${f(r.iron)} iron`)
+        if (era >= 4)  lines.push(`🔧 ${f(r.steel)} steel`)
+        if (era >= 5)  lines.push(`☢️ ${f(r.uranium)} uranium`)
+        resourcesRef.current.textContent = lines.join('\n')
+        resourcesRef.current.style.whiteSpace = 'pre'
+      }
+      // Events log — show last 5 events, newest on top
+      if (eventsLogRef.current && world.events.length > 0) {
+        eventsLogRef.current.innerHTML = world.events.slice(0, 5).map((e, i) => {
+          const alpha = 1 - i * 0.18
+          return `<div style="color:rgba(210,190,155,${alpha});font-size:11px;line-height:1.55;text-shadow:0 1px 3px rgba(0,0,0,0.9)">${e.msg}</div>`
+        }).join('')
+      }
+
+      if (crisisRef.current) {
+        const timer = world.collapseTimer || 0
+        if (timer > 0) {
+          const pct   = Math.round((timer / 600) * 100)
+          const label = world.era === 5 ? `☢️ MELTDOWN ${pct}%` : `💀 COLLAPSE ${pct}%`
+          crisisRef.current.textContent = label
+          crisisRef.current.style.display = 'block'
+          crisisRef.current.style.color   = world.era === 5 ? '#80ff60' : '#ff4444'
+          crisisRef.current.style.opacity = (world.tick % 30 < 15) ? '1' : '0.4'
+        } else {
+          crisisRef.current.style.display = 'none'
+        }
+      }
 
       // ── Day / night ────────────────────────────────────────────────────────────
       const night = getNightProgress(world.tick)
@@ -460,6 +597,19 @@ export default function App() {
             glow.addColorStop(1, 'rgba(255, 80, 10, 0)')
             ctx.fillStyle = glow
             ctx.fillRect(sx - 38, sy - 20, 76, 58)
+          }
+
+          // Heart glow — larger, warmer than building lanterns; scales with fuel
+          {
+            const { sx: hgx, sy: hgy } = tileToScreen(0, 0, camera.x, camera.y, W, H)
+            const [er, eg, eb] = ERA_DEFS[world.heart.era].lightColor
+            const heartR = (55 + 35 * fuelFrac) * lanternAlpha
+            const hg = ctx.createRadialGradient(hgx, hgy, 0, hgx, hgy, heartR)
+            hg.addColorStop(0,   `rgba(${er},${eg},${eb},${0.65 * lanternAlpha * fuelFrac})`)
+            hg.addColorStop(0.45, `rgba(${er},${eg},${eb},${0.25 * lanternAlpha * fuelFrac})`)
+            hg.addColorStop(1,   'rgba(0,0,0,0)')
+            ctx.fillStyle = hg
+            ctx.fillRect(hgx - heartR, hgy - heartR, heartR * 2, heartR * 2)
           }
           ctx.restore()
         }
@@ -558,9 +708,16 @@ export default function App() {
 
     const onKey = (e) => {
       if (e.key === 'c' || e.key === 'C') setCal(v => !v)
-      if (e.key === '1') { speedRef.current = 1;  setSpeed(1)  }
-      if (e.key === '2') { speedRef.current = 5;  setSpeed(5)  }
-      if (e.key === '3') { speedRef.current = 20; setSpeed(20) }
+      // Triple-D within 1.5 seconds opens dev menu
+      if (e.key === 'd' || e.key === 'D') {
+        const now = Date.now()
+        devKeyTimesRef.current.push(now)
+        devKeyTimesRef.current = devKeyTimesRef.current.filter(t => now - t < 1500)
+        if (devKeyTimesRef.current.length >= 3) {
+          devKeyTimesRef.current = []
+          setDevMenu(v => !v)
+        }
+      }
     }
 
     canvas.addEventListener('pointerdown',   onPointerDown)
@@ -587,26 +744,56 @@ export default function App() {
         ref={canvasRef}
         style={{ display: 'block', width: '100vw', height: '100vh', touchAction: 'none', cursor: 'grab' }}
       />
-      {/* Speed toggle button — cycles 1×→5×→20×→1× */}
-      <button
-        onClick={() => {
-          const next = speed === 1 ? 5 : speed === 5 ? 20 : 1
-          speedRef.current = next
-          setSpeed(next)
-        }}
+
+      {/* Nuclear meltdown flash overlay */}
+      <div ref={flashRef} style={{
+        position: 'fixed', inset: 0, zIndex: 100,
+        background: 'rgba(80,255,60,0.85)',
+        pointerEvents: 'none',
+        opacity: 0,
+      }} />
+      {/* Era + Fuel HUD — top-left, DOM-ref updated each frame (no re-render) */}
+      <div style={{
+        position: 'fixed', top: 14, left: 14, zIndex: 10,
+        background: 'rgba(0,0,0,0.55)', borderRadius: 8,
+        padding: '8px 12px', fontFamily: 'monospace',
+        minWidth: 140, backdropFilter: 'blur(4px)',
+        border: '1px solid rgba(255,200,80,0.18)',
+      }}>
+        <div ref={eraLabelRef} style={{ color: '#ffcc44', fontSize: 12, fontWeight: 'bold', letterSpacing: 1 }}>
+          Tribal
+        </div>
+        <div ref={timeLabelRef} style={{ color: '#886644', fontSize: 10, marginBottom: 5, marginTop: 1 }}>
+          Day 1 · Day
+        </div>
+        {/* Fuel bar — tap 5× to open dev menu */}
+        <div onClick={handleFuelTap} style={{ cursor: 'default', userSelect: 'none' }}>
+          <div style={{ fontSize: 10, color: '#888', marginBottom: 3 }}>FUEL</div>
+          <div style={{ background: '#111', borderRadius: 3, height: 6, overflow: 'hidden' }}>
+            <div ref={fuelBarRef} style={{ width: '100%', height: '100%', background: '#ff9930', transition: 'width 0.3s, background 0.3s' }} />
+          </div>
+        </div>
+        {/* Resource counts */}
+        <div ref={resourcesRef} style={{ marginTop: 8, fontSize: 11, color: '#aaa', letterSpacing: 0.5 }}>
+          🍎 0  🪵 0  🪨 0
+        </div>
+        {/* Fuel crisis warning — hidden by default, shown by crisisRef update */}
+        <div ref={crisisRef} style={{
+          display: 'none', marginTop: 6,
+          fontSize: 11, fontWeight: 'bold', letterSpacing: 1,
+          color: '#ff4444',
+        }} />
+      </div>
+
+      {/* Events log — bottom-left, last 5 events, DOM-ref updated each frame */}
+      <div
+        ref={eventsLogRef}
         style={{
-          position: 'fixed', top: 14, right: 14, zIndex: 10,
-          background: speed > 1 ? 'rgba(30,20,0,0.75)' : 'rgba(0,0,0,0.45)',
-          color: speed > 1 ? '#ffcc44' : '#888',
-          fontFamily: 'monospace', fontSize: 14, fontWeight: 'bold',
-          padding: '6px 14px', borderRadius: 6,
-          border: speed > 1 ? '1px solid #ffcc4488' : '1px solid #33333388',
-          cursor: 'pointer', letterSpacing: 1,
-          WebkitTapHighlightColor: 'transparent',
+          position: 'fixed', bottom: 18, left: 14, zIndex: 10,
+          maxWidth: 290, pointerEvents: 'none',
+          fontFamily: 'monospace',
         }}
-      >
-        {speed}×
-      </button>
+      />
 
       {/* Info panel — shown when a citizen or building is tapped */}
       {selected && (
@@ -625,16 +812,22 @@ export default function App() {
             <>
               <div style={{ color: '#ffcc44', fontWeight: 'bold', marginBottom: 8, fontSize: 15 }}>👤 Worker</div>
               {(() => {
-                const TASK_L  = { forage: 'Foraging', chop: 'Chopping wood', build: 'Building' }
+                const TASK_L  = {
+                  forage: 'Foraging', chop: 'Chopping wood', quarry: 'Quarrying stone', build: 'Building',
+                  mine_coal: 'Mining coal', mine_iron: 'Mining iron', mine_uranium: 'Mining uranium',
+                  decontaminate: 'Decontaminating', guard: 'Patrolling',
+                }
                 const STATE_L = {
                   idle: 'Looking for work', going_to_source: 'Heading out',
                   working: 'Working', going_to_storage: 'Returning to stockpile',
                   going_to_build: 'Heading to build site', building: 'Building',
                   going_home: 'Heading home', sleeping: 'Sleeping', arriving: 'Arriving',
+                  guard_patrol: 'On patrol', guard_rest: 'Resting (off duty)',
                 }
                 const d = selected.data
                 return (
                   <>
+                    <div>Role: <span style={{ color: '#aef' }}>{d.role === 'guard' ? '⚔️ Guard' : '👷 Worker'}</span></div>
                     <div>Task: <span style={{ color: '#aef' }}>{d.task ? (TASK_L[d.task] || d.task) : 'Idle'}</span></div>
                     <div>Status: <span style={{ color: '#aef' }}>{STATE_L[d.state] || d.state.replace(/_/g, ' ')}</span></div>
                     <div>Home: <span style={{ color: '#aef' }}>{d.homeId != null ? `House #${d.homeId}` : 'Homeless'}</span></div>
@@ -655,6 +848,78 @@ export default function App() {
             </>
           )}
           <div style={{ marginTop: 10, color: '#555', fontSize: 11 }}>tap to dismiss</div>
+        </div>
+      )}
+
+      {/* Dev menu — opened by pressing D three times within 1.5 seconds */}
+      {devMenu && (
+        <div style={{
+          position: 'fixed', top: '50%', left: '50%', transform: 'translate(-50%,-50%)',
+          zIndex: 200, background: 'rgba(8,12,20,0.96)', borderRadius: 10,
+          padding: '20px 24px', fontFamily: 'monospace', color: '#aaa', fontSize: 13,
+          border: '1px solid rgba(255,200,80,0.2)', minWidth: 300,
+          backdropFilter: 'blur(10px)',
+        }}>
+          <div style={{ color: '#ffcc44', fontWeight: 'bold', fontSize: 14, marginBottom: 16, letterSpacing: 2 }}>
+            ⚙️ DEV MENU
+          </div>
+
+          {/* Speed */}
+          <div style={{ marginBottom: 14 }}>
+            <div style={{ color: '#555', fontSize: 10, letterSpacing: 1, marginBottom: 6 }}>SPEED</div>
+            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+              {[0.25, 0.5, 1, 2, 5, 20].map(s => (
+                <button key={s} onClick={() => { speedRef.current = s; setSpeed(s) }} style={{
+                  padding: '4px 10px', borderRadius: 4, cursor: 'pointer',
+                  fontFamily: 'monospace', fontSize: 12,
+                  background: speed === s ? 'rgba(255,200,80,0.18)' : 'rgba(255,255,255,0.05)',
+                  color: speed === s ? '#ffcc44' : '#777',
+                  border: `1px solid ${speed === s ? 'rgba(255,200,80,0.45)' : 'rgba(255,255,255,0.08)'}`,
+                }}>{s}×</button>
+              ))}
+            </div>
+          </div>
+
+          {/* Jump to era */}
+          <div style={{ marginBottom: 14 }}>
+            <div style={{ color: '#555', fontSize: 10, letterSpacing: 1, marginBottom: 6 }}>JUMP TO ERA</div>
+            <div style={{ display: 'flex', gap: 6 }}>
+              {[1,2,3,4,5,6].map(e => (
+                <button key={e} onClick={() => jumpToEra(e)} style={{
+                  padding: '4px 12px', borderRadius: 4, cursor: 'pointer',
+                  fontFamily: 'monospace', fontSize: 12,
+                  background: 'rgba(255,255,255,0.05)', color: '#888',
+                  border: '1px solid rgba(255,255,255,0.08)',
+                }}>Era {e}</button>
+              ))}
+            </div>
+          </div>
+
+          {/* Force actions */}
+          <div style={{ display: 'flex', gap: 8 }}>
+            <button onClick={forceEvent} style={{
+              padding: '5px 14px', borderRadius: 4, cursor: 'pointer',
+              fontFamily: 'monospace', fontSize: 12,
+              background: 'rgba(80,200,100,0.12)', color: '#80cc80',
+              border: '1px solid rgba(80,200,100,0.28)',
+            }}>Force Event</button>
+            <button onClick={forceCollapse} style={{
+              padding: '5px 14px', borderRadius: 4, cursor: 'pointer',
+              fontFamily: 'monospace', fontSize: 12,
+              background: 'rgba(255,60,40,0.12)', color: '#ff8060',
+              border: '1px solid rgba(255,60,40,0.28)',
+            }}>Force Collapse</button>
+          </div>
+
+          <div style={{ marginTop: 16, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <div style={{ color: '#383838', fontSize: 10 }}>D × 3 or fuel × 5 to toggle</div>
+            <button onClick={() => setDevMenu(false)} style={{
+              padding: '4px 14px', borderRadius: 4, cursor: 'pointer',
+              fontFamily: 'monospace', fontSize: 12,
+              background: 'rgba(255,255,255,0.06)', color: '#666',
+              border: '1px solid rgba(255,255,255,0.1)',
+            }}>Close</button>
+          </div>
         </div>
       )}
 

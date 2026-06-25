@@ -4,7 +4,7 @@
 // Specialised roles (farmer, logger, guard, …) come in a later phase.
 
 import { TASKS, BUILDING_DEFS, ARRIVE_MIN_TICKS, ARRIVE_MAX_TICKS, REVEAL_RADIUS } from './config.js'
-import { key, makeCitizen, addEvent, revealAround } from './world.js'
+import { key, makeCitizen, addEvent, revealAround, isLit } from './world.js'
 import { getNightProgress } from './daynight.js'
 
 const MOVE_SPEED  = 0.035   // tiles per tick
@@ -31,7 +31,7 @@ function expandFarmland(world, farm) {
       visited.add(k)
       const tile = world.tiles.get(k)
       if (!tile || occupied.has(k)) continue
-      if (tile.type === 'grass' || tile.type === 'stump') {
+      if (tile.type === 'grass' || tile.type === 'stump') {  // never overwrite water/bridge
         tile.type = 'farmland'
         delete tile.decayAt
         count++
@@ -46,6 +46,18 @@ function expandFarmland(world, farm) {
 // Traces a diagonal path from a building toward the world center (0,0),
 // converting tiles to 'path' as it goes.
 
+function paveRoadTile(world, c, r) {
+  const tile = world.tiles.get(key(c, r))
+  if (!tile) return false
+  // Water becomes a bridge; everything else becomes path
+  if (tile.type !== 'path' && tile.type !== 'bridge') {
+    tile.type = tile.type === 'water' ? 'bridge' : 'path'
+    delete tile.decayAt
+    return true
+  }
+  return false
+}
+
 function layRoadToCenter(world, fromCol, fromRow) {
   let c = fromCol, r = fromRow
   let changed = false
@@ -55,9 +67,33 @@ function layRoadToCenter(world, fromCol, fromRow) {
     const dc = c > 0 ? -1 : c < 0 ? 1 : 0
     const dr = r > 0 ? -1 : r < 0 ? 1 : 0
     c += dc; r += dr
-    const tile = world.tiles.get(key(c, r))
-    if (tile) { tile.type = 'path'; delete tile.decayAt; changed = true }
-    revealAround(world, c, r, 3)   // reveal a corridor along the road
+    if (paveRoadTile(world, c, r)) changed = true
+    revealAround(world, c, r, 3)
+  }
+  if (changed) world.bgDirty = true
+}
+
+// Connect a newly built building to the nearest existing built building
+function layRoadToNearest(world, fromCol, fromRow) {
+  let best = null, bestDist = Infinity
+  for (const b of world.buildings) {
+    if (!b.isBuilt) continue
+    if (b.col === fromCol && b.row === fromRow) continue
+    const d = Math.abs(b.col - fromCol) + Math.abs(b.row - fromRow)
+    if (d < bestDist) { bestDist = d; best = b }
+  }
+  if (!best || bestDist > 25) return   // skip if too far / isolated
+
+  let c = fromCol, r = fromRow
+  let changed = false
+  const maxSteps = bestDist + 2
+  for (let i = 0; i < maxSteps; i++) {
+    if (c === best.col && r === best.row) break
+    const dc = c > best.col ? -1 : c < best.col ? 1 : 0
+    const dr = r > best.row ? -1 : r < best.row ? 1 : 0
+    c += dc; r += dr
+    if (paveRoadTile(world, c, r)) changed = true
+    revealAround(world, c, r, 2)
   }
   if (changed) world.bgDirty = true
 }
@@ -88,14 +124,20 @@ function claimedTiles(world, excludeId) {
   return claimed
 }
 
-function nearestForestTile(world, cx, cy, excludeId) {
+// Mining/decontamination tiles exist beyond the light radius — allow workers to
+// venture out to them. For gathering/farming tasks, enforce light radius safety.
+const LIGHT_REQUIRED_TASKS = new Set(['forage', 'chop', 'build'])
+
+function nearestSourceTile(world, cx, cy, excludeId, tileType, task = '') {
   const claimed = claimedTiles(world, excludeId)
+  const needsLight = LIGHT_REQUIRED_TASKS.has(task)
   let best = null, bestDist = Infinity
   for (const [k, t] of world.tiles) {
     if (!world.revealedTiles.has(k)) continue
-    if (t.type !== 'forest') continue
+    if (t.type !== tileType) continue
     if (claimed.has(k)) continue
     const [c, r] = k.split(',').map(Number)
+    if (needsLight && !isLit(world, c, r)) continue
     const d = Math.abs(c - cx) + Math.abs(r - cy)
     if (d < bestDist) { bestDist = d; best = { col: c, row: r, key: k } }
   }
@@ -106,7 +148,7 @@ function nearestForestTile(world, cx, cy, excludeId) {
 
 export function assignHome(citizen, world) {
   for (const b of world.buildings) {
-    if (b.type !== 'house' || !b.isBuilt) continue
+    if (b.type !== 'house' || !b.isBuilt || b.burned) continue
     if (!b.residents) b.residents = []
     const cap = b.shelter ?? BUILDING_DEFS.house.shelter
     if (b.residents.length < cap) {
@@ -124,22 +166,111 @@ function shouldWake(world)   { return getNightProgress(world.tick) < 0.12 }
 function tryGoHome(citizen, world) {
   if (!shouldGoHome(world)) return false
   if (citizen.homeId == null) return false
-  const home = world.buildings.find(b => b.id === citizen.homeId)
-  if (!home) return false
+  const home = world.buildings.find(b => b.id === citizen.homeId && b.isBuilt && !b.burned)
+  if (!home) {
+    citizen.homeId = null   // home was burned down — clear reference
+    return false
+  }
   citizen.state   = 'going_home'
   citizen.targetX = home.col
   citizen.targetY = home.row
   return true
 }
 
+// ── Guard behaviour ────────────────────────────────────────────────────────────
+// Guards skip the normal worker loop. At night they patrol the lit perimeter;
+// during the day they rest near the center.
+
+function updateGuard(citizen, world) {
+  const night = getNightProgress(world.tick)
+
+  if (night > 0.3) {
+    // Night / dusk — patrol points on the light radius perimeter
+    const atTarget = Math.hypot(citizen.x - citizen.targetX, citizen.y - citizen.targetY) < ARRIVE_DIST
+    if (citizen.state !== 'guard_patrol' || atTarget) {
+      const angle = Math.random() * Math.PI * 2
+      const r = Math.max(3, world.heart.lightRadius * 0.80)
+      citizen.targetX = Math.cos(angle) * r
+      citizen.targetY = Math.sin(angle) * r
+      citizen.state   = 'guard_patrol'
+    }
+    moveToward(citizen, citizen.targetX, citizen.targetY)
+    citizen.task    = 'guard'
+    citizen.carrying = null
+  } else {
+    // Day — rest near center; pick a new loiter spot occasionally
+    citizen.task = null
+    if (citizen.state === 'guard_patrol') {
+      // Just came off night patrol — pick a daytime loiter spot
+      citizen.targetX = (Math.random() - 0.5) * 4
+      citizen.targetY = (Math.random() - 0.5) * 4
+      citizen.state   = 'guard_rest'
+    } else if (citizen.state === 'guard_rest') {
+      const arrived = moveToward(citizen, citizen.targetX, citizen.targetY)
+      if (arrived && Math.random() < 0.004) {
+        citizen.targetX = (Math.random() - 0.5) * 5
+        citizen.targetY = (Math.random() - 0.5) * 5
+      }
+    } else {
+      citizen.state   = 'guard_rest'
+      citizen.targetX = 0; citizen.targetY = 0
+    }
+  }
+}
+
 // ── Task picking ───────────────────────────────────────────────────────────────
 
 function pickResourceTask(world) {
-  const food = world.resources.food
-  const wood = world.resources.wood
-  // Food system disabled — workers chop wood unless surplus is needed
-  if (wood < 25) return 'chop'
-  return food <= wood ? 'forage' : 'chop'
+  const era = world.heart.era
+  const r   = world.resources
+
+  // Era 6: clean up contamination first, then sustain
+  if (era >= 6) {
+    const hasContam = [...world.tiles.values()].some(t => t.type === 'contamination')
+    if (hasContam) return 'decontaminate'
+    return r.food < 30 ? 'forage' : 'chop'
+  }
+
+  // Era 5: uranium is the priority
+  if (era >= 5) {
+    if (r.uranium < 15) return 'mine_uranium'
+    if (r.food    < 40) return 'forage'
+    if (r.coal    < 60) return 'mine_coal'
+    return 'mine_uranium'
+  }
+
+  // Era 4: coal and iron dominate
+  if (era >= 4) {
+    if (r.food     < 30) return 'forage'
+    if (r.coal     < 60) return 'mine_coal'
+    if (r.iron_ore < 40) return 'mine_iron'
+    if (r.wood     < 20) return 'chop'
+    return 'mine_coal'
+  }
+
+  // Era 3: coal and iron ore needed, food still matters
+  if (era >= 3) {
+    if (r.food     < 20) return 'forage'
+    if (r.coal     < 30) return 'mine_coal'
+    if (r.iron_ore < 20) return 'mine_iron'
+    if (r.wood     < 20) return 'chop'
+    if (r.stone    < 30) return 'quarry'
+    return 'mine_coal'
+  }
+
+  // Era 2: same as era 1 but more relaxed thresholds
+  if (era >= 2) {
+    if (r.wood  < 30) return 'chop'
+    if (r.food  < 12) return 'forage'
+    if (r.stone < 50) return 'quarry'
+    return r.food <= r.wood ? 'forage' : 'chop'
+  }
+
+  // Era 1: core loop
+  if (r.wood  < 25) return 'chop'
+  if (r.food  < 10) return 'forage'
+  if (r.stone < 40) return 'quarry'
+  return r.food <= r.wood ? 'forage' : 'chop'
 }
 
 function pickTask(citizen, world) {
@@ -186,6 +317,9 @@ function startBuild(citizen, world) {
 // ── Unified worker update ──────────────────────────────────────────────────────
 
 function updateWorker(citizen, world) {
+  // Guards have their own behaviour — skip the normal worker state machine
+  if (citizen.role === 'guard') { updateGuard(citizen, world); return }
+
   switch (citizen.state) {
 
     case 'going_home': {
@@ -210,14 +344,17 @@ function updateWorker(citizen, world) {
         citizen.task = pickResourceTask(world)
       }
 
-      // Gather resource from forest
+      // Gather resource from nearest matching source tile
       const taskDef = TASKS[citizen.task]
       if (!taskDef?.sourceTile) return
 
-      const target = nearestForestTile(world, citizen.x, citizen.y, citizen.id)
+      const target = nearestSourceTile(world, citizen.x, citizen.y, citizen.id, taskDef.sourceTile, citizen.task)
       if (!target) {
-        // No forest available — swap task
-        citizen.task = citizen.task === 'chop' ? 'forage' : 'chop'
+        // No suitable tile — fall back to a different task
+        const miningTasks = ['quarry', 'mine_coal', 'mine_iron', 'mine_uranium']
+        if (miningTasks.includes(citizen.task)) citizen.task = 'chop'
+        else if (citizen.task === 'decontaminate') citizen.task = 'forage'
+        else citizen.task = citizen.task === 'chop' ? 'forage' : 'chop'
         return
       }
       citizen.targetTile = target.key
@@ -242,7 +379,11 @@ function updateWorker(citizen, world) {
         const taskDef = TASKS[citizen.task]
         if (taskDef?.chops && citizen.targetTile) {
           const tile = world.tiles.get(citizen.targetTile)
-          if (tile) { tile.type = 'stump'; tile.decayAt = world.tick + 600 }
+          if (tile) {
+            tile.type = taskDef.resultTile || 'grass'
+            if (taskDef.decayAfter) tile.decayAt = world.tick + taskDef.decayAfter
+            else delete tile.decayAt
+          }
           citizen.targetTile = null
         }
         citizen.carrying = { resource: taskDef?.resource, amount: taskDef?.yield || 1 }
@@ -256,8 +397,11 @@ function updateWorker(citizen, world) {
     case 'going_to_storage': {
       const arrived = moveToward(citizen, citizen.targetX, citizen.targetY)
       if (arrived && citizen.carrying) {
-        world.resources[citizen.carrying.resource] =
-          (world.resources[citizen.carrying.resource] || 0) + citizen.carrying.amount
+        // null resource tasks (decontaminate) have no yield to deposit
+        if (citizen.carrying.resource) {
+          world.resources[citizen.carrying.resource] =
+            (world.resources[citizen.carrying.resource] || 0) + citizen.carrying.amount
+        }
         citizen.carrying   = null
         citizen.targetTile = null
         citizen.state      = 'idle'
@@ -306,6 +450,7 @@ function updateWorker(citizen, world) {
         revealAround(world, bld.col, bld.row, REVEAL_RADIUS)
         if (bld.type === 'farm') expandFarmland(world, bld)
         layRoadToCenter(world, bld.col, bld.row)
+        layRoadToNearest(world, bld.col, bld.row)
 
         citizen.buildTarget = null
         citizen.task        = null

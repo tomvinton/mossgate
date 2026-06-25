@@ -3,6 +3,13 @@
 export const key   = (c, r) => `${c},${r}`
 export const unkey = (k)    => k.split(',').map(Number)
 
+import { ERA_DEFS } from './config.js'
+
+// Returns true if (col, row) is within the heart's current light radius
+export function isLit(world, col, row) {
+  return Math.sqrt(col * col + row * row) <= world.heart.lightRadius
+}
+
 // ── Infinite procedural tile generation ───────────────────────────────────────
 // Deterministic hash — same (col, row, seed) always produces the same tile type.
 
@@ -11,23 +18,107 @@ function hashTile(col, row, seed) {
   return n - Math.floor(n)
 }
 
-export function generateTileType(col, row, seed) {
+// Simple seeded RNG (LCG) for world feature generation
+function seededRng(seed) {
+  let s = Math.floor(seed * 9301 + 49297) % 233280
+  return () => { s = (s * 9301 + 49297) % 233280; return s / 233280 }
+}
+
+// ── World feature generation — lakes and rivers ────────────────────────────────
+
+export function generateLakes(seed) {
+  const rng = seededRng(seed)
+  const lakes = []
+  for (let i = 0; i < 6; i++) {
+    const angle = rng() * Math.PI * 2
+    const dist  = 14 + rng() * 38
+    lakes.push({
+      col:    Math.round(Math.cos(angle) * dist),
+      row:    Math.round(Math.sin(angle) * dist),
+      radius: 2.5 + rng() * 4,
+    })
+  }
+  return lakes
+}
+
+export function generateRivers(seed) {
+  const rng    = seededRng(seed + 7777)
+  const rivers = []
+  for (let i = 0; i < 2; i++) {
+    rivers.push({
+      angle:     rng() * Math.PI * 2,
+      amplitude: 3 + rng() * 5,
+      frequency: 0.05 + rng() * 0.05,
+      phase:     rng() * Math.PI * 2,
+    })
+  }
+  return rivers
+}
+
+function isWaterTile(col, row, seed, lakes, rivers) {
+  // Keep the starting area dry
+  if (Math.abs(col) <= 9 && Math.abs(row) <= 9) return false
+
+  // Parametric sinusoidal rivers — extend to infinity in both directions
+  for (const rv of rivers) {
+    const cosA = Math.cos(rv.angle), sinA = Math.sin(rv.angle)
+    const t    =  col * cosA + row * sinA          // along river axis
+    const perp = -col * sinA + row * cosA          // perpendicular offset
+    const center = rv.amplitude * Math.sin(rv.frequency * t + rv.phase)
+    if (Math.abs(perp - center) < 1.4) return true
+  }
+
+  // Lakes — noisy radius around each center
+  for (const lk of lakes) {
+    const d      = Math.sqrt((col - lk.col) ** 2 + (row - lk.row) ** 2)
+    const noisyR = lk.radius * (0.7 + hashTile(col, row, seed + 999) * 0.6)
+    if (d < noisyR) return true
+  }
+
+  return false
+}
+
+export function generateTileType(col, row, seed, lakes = [], rivers = []) {
   if (Math.abs(col) <= 3 && Math.abs(row) <= 3) return 'grass'  // central clearing
+  if (isWaterTile(col, row, seed, lakes, rivers)) return 'water'
+  const dist = Math.sqrt(col * col + row * row)
+
+  // ── Resource strata — deeper = rarer ──────────────────────────────────────
+  // Uranium ore: ultra-rare, deep exploration (era 5 resource)
+  if (dist >= 30) {
+    const uHash = hashTile(col * 7.3 + 1.1, row * 5.1 + 0.7, seed + 9999)
+    if (uHash > 0.990) return 'uranium_ore'
+  }
+  // Iron deposits: rare, mid-range (era 3 resource)
+  if (dist >= 18) {
+    const iHash = hashTile(col * 4.1 + 1.1, row * 3.7 + 0.7, seed + 7777)
+    if (iHash > 0.968) return 'iron_deposit'
+  }
+  // Coal seams: moderate density, closer in (era 3 resource)
+  if (dist >= 12) {
+    const cHash = hashTile(col * 2.3 + 0.3, row * 1.9 + 0.8, seed + 5555)
+    if (cHash > 0.952) return 'coal_seam'
+  }
+  // Rock nodes: surface stone (era 1-2 resource)
+  if (dist >= 8) {
+    const rockHash = hashTile(col * 3.7 + 0.5, row * 2.9 + 0.5, seed + 333)
+    if (rockHash > 0.94) return 'rock'
+  }
+
   const rand    = hashTile(col, row, seed)
-  const dist    = Math.sqrt(col * col + row * row)
-  const density = Math.max(0.50, 0.82 - dist * 0.002)   // forest thins slightly with distance
+  const density = Math.max(0.50, 0.82 - dist * 0.002)
   return rand < density ? 'forest' : 'grass'
 }
 
 // Initialise a small seed tile set just for the starter setup (roads, houses).
 // Everything beyond this area is generated on demand by revealAround.
-function initTiles(seed) {
+function initTiles(seed, lakes, rivers) {
   const tiles = new Map()
   const INIT_R = 8
   for (let c = -INIT_R; c <= INIT_R; c++) {
     for (let r = -INIT_R; r <= INIT_R; r++) {
       if (Math.sqrt(c * c + r * r) > INIT_R) continue
-      tiles.set(key(c, r), { type: generateTileType(c, r, seed) })
+      tiles.set(key(c, r), { type: generateTileType(c, r, seed, lakes, rivers) })
     }
   }
   return tiles
@@ -41,8 +132,9 @@ export function makeCitizen(_job, x, y, state = 'idle') {
   return {
     id:          _nextId++,
     job:         'worker',   // all citizens are general workers (phase 1)
+    role:        'worker',   // 'worker' | 'guard'
     task:        null,       // current task: 'forage' | 'chop' | 'build' | null (idle)
-    state,       // idle | going_to_source | working | going_to_storage | going_to_build | building | arriving | going_home | sleeping
+    state,       // idle | going_to_source | working | going_to_storage | going_to_build | building | arriving | going_home | sleeping | guard_patrol | guard_rest
     x,           // fractional tile col
     y,           // fractional tile row
     targetTile:  null,   // key(col, row) of work target
@@ -59,10 +151,36 @@ export function makeCitizen(_job, x, y, state = 'idle') {
 
 // ── World factory ──────────────────────────────────────────────────────────────
 
-export function createWorld() {
+export function createWorld(opts = {}) {
   _nextId = 0
-  const seed  = Math.random() * 99999
-  const tiles = initTiles(seed)
+  const nuclearRevealed = opts.nuclearRevealed || false
+  const seed   = Math.random() * 99999
+  const lakes  = generateLakes(seed)
+  const rivers = generateRivers(seed)
+  const tiles  = initTiles(seed, lakes, rivers)
+
+  // ── The twist: the world ALWAYS starts in nuclear ruins ───────────────────────
+  // The heart (campfire) sits on top of this. Players won't know what it is
+  // until they've built a nuclear plant and watched it explode — revealing the same
+  // structure they started on.
+  if (nuclearRevealed) {
+    // After the twist is revealed, the starting tile clearly shows what it is.
+    // Contamination rings out from the old reactor core.
+    tiles.set(key(0, 0), { type: 'nuclear_ruin_revealed' })
+    const contaminationHash = (c, r) => hashTile(c * 3.1, r * 2.7, seed + 12345)
+    for (let c = -10; c <= 10; c++) {
+      for (let r = -10; r <= 10; r++) {
+        const d = Math.sqrt(c * c + r * r)
+        if (d < 1 || d > 10) continue
+        const prob = 0.95 - (d / 10) * 0.55
+        if (contaminationHash(c, r) < prob) {
+          tiles.set(key(c, r), { type: 'contamination' })
+        }
+      }
+    }
+  } else {
+    tiles.set(key(0, 0), { type: 'nuclear_ruin' })
+  }
 
   // ── Starter houses — 3 small huts, one per founding citizen ─────────────────
   // Placed at the corners of the grass clearing, shelter:1 each (personal huts)
@@ -101,11 +219,37 @@ export function createWorld() {
   const world = {
     tiles,
     seed,
+    lakes,
+    rivers,
+
+    // ── Era / heart ─────────────────────────────────────────────────────────────
+    era: 1,
+    nuclearRevealed,          // true after nuclear catastrophe — reveals the twist
+    heart: {
+      era:         1,
+      col:         0,
+      row:         0,
+      fuelTank:    ERA_DEFS[1].fuelMax,
+      fuelMax:     ERA_DEFS[1].fuelMax,
+      lightRadius: ERA_DEFS[1].lightRadius,
+    },
+
     buildings,
     citizens,
 
     // Resources — central stockpile
-    resources: { food: 3, wood: 0 },
+    resources: {
+      // Era 1 raw
+      food: 3, wood: 0, stone: 0,
+      // Era 2 processed
+      planks: 0, cut_stone: 0,
+      // Era 3 raw + processed
+      coal: 0, iron_ore: 0, iron: 0,
+      // Era 4 processed
+      steel: 0,
+      // Era 5 raw
+      uranium: 0,
+    },
 
     // Housing — starts at 3 (one slot per starter hut)
     housingCapacity: 3,
@@ -127,6 +271,11 @@ export function createWorld() {
 
     // Tick counter
     tick: 0,
+    day:  0,   // completed day/night cycles (each cycle = DAY_TICKS + NIGHT_TICKS)
+
+    // Legacy marker system — tracks rare milestones and earned monument types
+    legacy:         new Set(),
+    legacyCounters: { fireDeaths: 0, fireIntercepts: 0, famineDeaths: 0, nearCollapses: 0, peakPop: 0 },
 
     // Camera hint
     newBuilding: null,
@@ -138,9 +287,8 @@ export function createWorld() {
     revealedTiles: new Set(),
   }
 
-  // Seed initial fog reveal from starter buildings and center stockpile
-  for (const b of buildings) revealAround(world, b.col, b.row, 12)
-  revealAround(world, 0, 0, 8)
+  // Reveal the initial lit zone around the heart
+  revealAround(world, 0, 0, ERA_DEFS[1].lightRadius + 4)
 
   return world
 }
@@ -159,7 +307,7 @@ export function revealAround(world, col, row, radius) {
       const k = key(c, ro)
       // Generate tile on demand if not yet in the world
       if (!world.tiles.has(k)) {
-        world.tiles.set(k, { type: generateTileType(c, ro, world.seed) })
+        world.tiles.set(k, { type: generateTileType(c, ro, world.seed, world.lakes, world.rivers) })
       }
       if (!world.revealedTiles.has(k)) {
         world.revealedTiles.add(k)
@@ -191,6 +339,31 @@ export function hasBuilt(world, type) {
 export function addEvent(world, msg) {
   world.events.unshift({ msg, tick: world.tick })
   if (world.events.length > 20) world.events.pop()
+}
+
+// ── Legacy marker system ───────────────────────────────────────────────────────
+// Monuments placed near the heart when rare conditions are met.
+// Each type can only be awarded once per world.
+
+const LEGACY_SLOTS = [
+  [2, -2], [-2, -2], [3, 0], [-3, 0], [2, 2], [-2, 2],
+]
+
+export function awardLegacy(world, type, message) {
+  if (!world.legacy)         world.legacy         = new Set()
+  if (!world.legacyCounters) world.legacyCounters = { fireDeaths: 0, fireIntercepts: 0, famineDeaths: 0, nearCollapses: 0, peakPop: 0 }
+  if (world.legacy.has(type)) return
+
+  const slotIdx = world.legacy.size   // use size before add as slot index
+  world.legacy.add(type)
+
+  if (slotIdx < LEGACY_SLOTS.length) {
+    const [dc, dr] = LEGACY_SLOTS[slotIdx]
+    world.tiles.set(key(dc, dr), { type })
+    world.bgDirty = true
+  }
+
+  addEvent(world, message)
 }
 
 export function computeBounds(tiles) {

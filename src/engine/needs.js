@@ -30,6 +30,12 @@ export function checkUnlocks(world) {
 
 // ── Build queue management — builder auto-decides what to build ───────────────
 
+// Check whether the world can afford a building's full cost
+function canAfford(world, type) {
+  const cost = BUILDING_DEFS[type]?.cost || {}
+  return Object.entries(cost).every(([res, amt]) => (world.resources[res] || 0) >= amt)
+}
+
 export function updateBuildQueue(world) {
   // Don't pile up — only queue one thing at a time
   if (world.buildQueue.length > 0) return
@@ -88,12 +94,104 @@ export function updateBuildQueue(world) {
     }
   }
 
-  // Priority 5: Additional houses if growing
-  if (headroom <= 2 && world.unlocks.has('house') && wood >= BUILDING_DEFS.house.cost.wood) {
+  // Priority 5: Era 2 processing buildings — sawmill before stonemason
+  if (world.unlocks.has('sawmill') && !hasBuilt(world, 'sawmill') && canAfford(world, 'sawmill')) {
+    const site = findBuildSite(world, 'sawmill')
+    if (site) {
+      world.buildQueue.push({ type: 'sawmill', ...site })
+      addEvent(world, 'Builder planning a sawmill')
+      return
+    }
+  }
+
+  if (world.unlocks.has('stonemason') && !hasBuilt(world, 'stonemason') && canAfford(world, 'stonemason')) {
+    const site = findBuildSite(world, 'stonemason')
+    if (site) {
+      world.buildQueue.push({ type: 'stonemason', ...site })
+      addEvent(world, 'Builder planning a stonemason')
+      return
+    }
+  }
+
+  // Priority 6: Era 2 housing — longhouse (shelters 4, requires planks)
+  if (world.era >= 2 && headroom <= 3 && world.unlocks.has('longhouse') && canAfford(world, 'longhouse')) {
+    const site = findBuildSite(world, 'longhouse')
+    if (site) {
+      world.buildQueue.push({ type: 'longhouse', ...site })
+      addEvent(world, 'Builder planning a longhouse')
+      return
+    }
+  }
+
+  // Priority 7: Market (Era 2 milestone)
+  if (world.unlocks.has('market') && !hasBuilt(world, 'market') && canAfford(world, 'market')) {
+    const site = findBuildSite(world, 'market')
+    if (site) {
+      world.buildQueue.push({ type: 'market', ...site })
+      addEvent(world, 'Builder planning a market')
+      return
+    }
+  }
+
+  // Priority 8: Additional Era 1 houses if still needed and not yet era 2
+  if (world.era < 2 && headroom <= 2 && world.unlocks.has('house') && wood >= BUILDING_DEFS.house.cost.wood) {
     const site = findBuildSite(world, 'house')
     if (site) {
       world.buildQueue.push({ type: 'house', ...site })
       addEvent(world, 'Builder planning a house')
+      return
+    }
+  }
+
+  // ── Era 3 buildings ────────────────────────────────────────────────────────
+  if (world.unlocks.has('forge_building') && !hasBuilt(world, 'forge_building') && canAfford(world, 'forge_building')) {
+    const site = findBuildSite(world, 'forge_building')
+    if (site) { world.buildQueue.push({ type: 'forge_building', ...site }); addEvent(world, 'Builder planning a forge'); return }
+  }
+
+  if (world.era >= 3 && headroom <= 3 && world.unlocks.has('great_hall') && canAfford(world, 'great_hall')) {
+    const site = findBuildSite(world, 'great_hall')
+    if (site) { world.buildQueue.push({ type: 'great_hall', ...site }); addEvent(world, 'Builder planning a great hall'); return }
+  }
+
+  if (world.unlocks.has('watchtower') && !hasBuilt(world, 'watchtower') && canAfford(world, 'watchtower')) {
+    const site = findBuildSite(world, 'watchtower')
+    if (site) { world.buildQueue.push({ type: 'watchtower', ...site }); addEvent(world, 'Builder planning a watchtower'); return }
+  }
+
+  // ── Era 4 buildings ────────────────────────────────────────────────────────
+  if (world.unlocks.has('factory') && !hasBuilt(world, 'factory') && canAfford(world, 'factory')) {
+    const site = findBuildSite(world, 'factory')
+    if (site) { world.buildQueue.push({ type: 'factory', ...site }); addEvent(world, 'Builder planning a factory'); return }
+  }
+
+  if (world.era >= 4 && headroom <= 4 && world.unlocks.has('tenement') && canAfford(world, 'tenement')) {
+    const site = findBuildSite(world, 'tenement')
+    if (site) { world.buildQueue.push({ type: 'tenement', ...site }); addEvent(world, 'Builder planning a tenement'); return }
+  }
+
+  if (world.unlocks.has('power_station') && !hasBuilt(world, 'power_station') && canAfford(world, 'power_station')) {
+    const site = findBuildSite(world, 'power_station')
+    if (site) { world.buildQueue.push({ type: 'power_station', ...site }); addEvent(world, 'Builder planning a power station'); return }
+  }
+
+  // ── Era 5 buildings ────────────────────────────────────────────────────────
+  if (world.unlocks.has('nuclear_plant') && !hasBuilt(world, 'nuclear_plant') && canAfford(world, 'nuclear_plant')) {
+    const site = findBuildSite(world, 'nuclear_plant')
+    if (site) { world.buildQueue.push({ type: 'nuclear_plant', ...site }); addEvent(world, 'Builder planning a nuclear plant'); return }
+  }
+
+  // ── Era 6 buildings ────────────────────────────────────────────────────────
+  if (world.unlocks.has('decontam_center') && !hasBuilt(world, 'decontam_center') && canAfford(world, 'decontam_center')) {
+    const site = findBuildSite(world, 'decontam_center')
+    if (site) { world.buildQueue.push({ type: 'decontam_center', ...site }); addEvent(world, 'Builder planning a decontamination center'); return }
+  }
+
+  if (world.unlocks.has('solar_farm') && canAfford(world, 'solar_farm')) {
+    const solarCount = world.buildings.filter(b => b.type === 'solar_farm' && b.isBuilt).length
+    if (solarCount < 4) {  // build up to 4 solar farms
+      const site = findBuildSite(world, 'solar_farm')
+      if (site) { world.buildQueue.push({ type: 'solar_farm', ...site }); addEvent(world, 'Builder planning a solar farm'); return }
     }
   }
 }
@@ -108,7 +206,7 @@ function findBuildSite(world, type) {
 
   for (const [k, t] of world.tiles) {
     if (!world.revealedTiles.has(k)) continue
-    if (t.type !== 'grass' && t.type !== 'stump') continue
+    if (t.type !== 'grass' && t.type !== 'stump') continue   // water/bridge/farmland excluded
     if (occupied.has(k)) continue
 
     const [c, r] = unkey(k)
