@@ -359,21 +359,24 @@ export default function App() {
           Math.abs(camRow - lr.y) > 4 ||
           Math.abs(zoom  - lr.zoom) > 0.08
         if (moved) {
-          // Radius that covers the visible viewport plus a generous offscreen buffer
-          const viewRadius = Math.ceil(Math.max(W, H) / (64 * zoom)) + 12
+          // Radius that covers the visible viewport plus a buffer, capped to prevent
+          // unbounded tile growth at low zoom (50k+ tiles degrades to near-freeze).
+          const viewRadius = Math.min(70, Math.ceil(Math.max(W, H) / (64 * zoom)) + 12)
           revealAround(world, camCol, camRow, viewRadius)
           lr.x = camCol; lr.y = camRow; lr.zoom = zoom
         }
       }
 
       // ── Sorted revealed tile keys — re-sorted whenever new tiles are revealed ──
+      // Pre-parse col/row once here so the draw loop never calls split().map().
       const revCount = world.revealedTiles.size
       if (!sortedKeysRef.current || sortedKeysRef.current.length !== revCount) {
-        sortedKeysRef.current = [...world.revealedTiles].sort((a, b) => {
-          const [ac, ar] = a.split(',').map(Number)
-          const [bc, br] = b.split(',').map(Number)
-          const da = ac + ar, db = bc + br
-          return da !== db ? da - db : ac - bc
+        sortedKeysRef.current = [...world.revealedTiles].map(k => {
+          const ci = k.indexOf(',')
+          return { k, col: +k.slice(0, ci), row: +k.slice(ci + 1) }
+        }).sort((a, b) => {
+          const da = a.col + a.row, db = b.col + b.row
+          return da !== db ? da - db : a.col - b.col
         })
       }
       const keys = sortedKeysRef.current
@@ -407,14 +410,21 @@ export default function App() {
 
         const builtAt  = new Map()
         for (const b of world.buildings) if (b.isBuilt) builtAt.set(`${b.col},${b.row}`, b)
-        // Cull based on pre-zoom logical coords; widen margin for low zoom values
-        const viewPad = Math.max(200, W / Math.min(zoom, 1))
 
-        for (const k of keys) {
-          const [col, row] = k.split(',').map(Number)
+        // Zoom-correct viewport culling.
+        // tileToScreen returns unzoomed logical coords; the bgCtx applies zoom centered
+        // on (W/2, H/2). A tile at logical sx is visible when:
+        //   0 ≤ sx*zoom + W/2*(1-zoom) ≤ W  →  W/2 ± W/(2*zoom)
+        // We add a small pixel buffer so tiles at the edge aren't clipped.
+        const halfVW = W / (2 * zoom) + 96
+        const halfVH = H / (2 * zoom) + 96
+        const minSX = W / 2 - halfVW, maxSX = W / 2 + halfVW
+        const minSY = H / 2 - halfVH, maxSY = H / 2 + halfVH
+
+        for (const { k, col, row } of keys) {
           const tile = world.tiles.get(k)
           const { sx, sy } = tileToScreen(col, row, camera.x, camera.y, W, H)
-          if (sx < -viewPad || sx > W + viewPad || sy < -viewPad || sy > H + viewPad) continue
+          if (sx < minSX || sx > maxSX || sy < minSY || sy > maxSY) continue
           drawTile(bgCtx, sx, sy, tile.type)
           const b = builtAt.get(k)
           if (b) {
@@ -459,12 +469,12 @@ export default function App() {
       const fuelFrac = world.heart.fuelTank / world.heart.fuelMax
       drawHeart(ctx, csx, csy, world.heart.era, fuelFrac)
 
-      // Citizens
-      const viewPadC = Math.max(80, 80 / Math.min(zoom, 1))
+      // Citizens — zoom-correct culling
+      const cHW = W / (2 * zoom) + 80, cHH = H / (2 * zoom) + 80
       const sorted = [...world.citizens].sort((a, b) => (a.x + a.y) - (b.x + b.y))
       for (const v of sorted) {
         const { sx, sy } = tileToScreen(v.x, v.y, camera.x, camera.y, W, H)
-        if (sx < -viewPadC || sx > W + viewPadC || sy < -viewPadC || sy > H + viewPadC) continue
+        if (sx < W/2 - cHW || sx > W/2 + cHW || sy < H/2 - cHH || sy > H/2 + cHH) continue
         drawVillager(ctx, sx, sy, v)
       }
 
@@ -586,11 +596,11 @@ export default function App() {
           ctx.save()
           ctx.setTransform(zoomTx, 0, 0, zoomTx, zoomEx, zoomEy)
           ctx.globalCompositeOperation = 'screen'
-          const viewPadL = Math.max(100, 100 / Math.min(zoom, 1))
+          const lHW = W / (2 * zoom) + 100, lHH = H / (2 * zoom) + 100
           for (const b of world.buildings) {
             if (!b.isBuilt) continue
             const { sx, sy } = tileToScreen(b.col, b.row, camera.x, camera.y, W, H)
-            if (sx < -viewPadL || sx > W + viewPadL || sy < -viewPadL || sy > H + viewPadL) continue
+            if (sx < W/2 - lHW || sx > W/2 + lHW || sy < H/2 - lHH || sy > H/2 + lHH) continue
             const glow = ctx.createRadialGradient(sx, sy, 0, sx, sy, 38)
             glow.addColorStop(0, `rgba(255, 160, 40, ${0.30 * lanternAlpha})`)
             glow.addColorStop(0.4, `rgba(255, 100, 20, ${0.12 * lanternAlpha})`)

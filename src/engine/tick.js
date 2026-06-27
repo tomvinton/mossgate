@@ -141,10 +141,14 @@ export function tick(world) {
   // Update citizens
   updateCitizens(world)
 
-  // ── Tile decay ────────────────────────────────────────────────────────────
-  for (const [, t] of world.tiles) {
-    if (t.decayAt && world.tick >= t.decayAt) {
-      t.type = 'grass'; delete t.decayAt; world.bgDirty = true
+  // ── Tile decay — throttled to every 20 ticks (1 sec at 1×) ───────────────
+  // Decay timers are 600–4000 ticks long, so 1-sec resolution is imperceptible.
+  // Scanning all tiles every tick is O(N) on a map that can reach 50k+ entries.
+  if (world.tick % 20 === 0) {
+    for (const [, t] of world.tiles) {
+      if (t.decayAt && world.tick >= t.decayAt) {
+        t.type = 'grass'; delete t.decayAt; world.bgDirty = true
+      }
     }
   }
 
