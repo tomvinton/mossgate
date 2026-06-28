@@ -13,13 +13,13 @@ export function isLit(world, col, row) {
 // ── Infinite procedural tile generation ───────────────────────────────────────
 // Deterministic hash — same (col, row, seed) always produces the same tile type.
 
-function hashTile(col, row, seed) {
+export function hashTile(col, row, seed) {
   const n = Math.sin(col * 127.1 + row * 311.7 + seed * 74.3) * 43758.5453123
   return n - Math.floor(n)
 }
 
 // Simple seeded RNG (LCG) for world feature generation
-function seededRng(seed) {
+export function seededRng(seed) {
   let s = Math.floor(seed * 9301 + 49297) % 233280
   return () => { s = (s * 9301 + 49297) % 233280; return s / 233280 }
 }
@@ -128,6 +128,8 @@ function initTiles(seed, lakes, rivers) {
 
 let _nextId = 0
 
+export function resetCitizenIds() { _nextId = 0 }
+
 export function makeCitizen(_job, x, y, state = 'idle') {
   return {
     id:          _nextId++,
@@ -146,6 +148,8 @@ export function makeCitizen(_job, x, y, state = 'idle') {
     arriveFrom:  null,
     buildTarget: null,   // { col, row, buildingId } — used when task === 'build'
     homeId:      null,   // id of the house building this citizen lives in
+    chopPhase:   0,      // current chop cycle (0–8) during tree felling
+    chopSite:    null,   // { col, row } of the felled tree, for log collection loop
   }
 }
 
@@ -182,39 +186,12 @@ export function createWorld(opts = {}) {
     tiles.set(key(0, 0), { type: 'nuclear_ruin' })
   }
 
-  // ── Starter houses — 3 small huts, one per founding citizen ─────────────────
-  // Placed at the corners of the grass clearing, shelter:1 each (personal huts)
-  const buildings = [
-    { id: 0, type: 'house', col: -3, row:  1, isBuilt: true, buildProgress: 100, workerIds: [], residents: [], shelter: 1 },
-    { id: 1, type: 'house', col:  1, row: -3, isBuilt: true, buildProgress: 100, workerIds: [], residents: [], shelter: 1 },
-    { id: 2, type: 'house', col:  3, row:  1, isBuilt: true, buildProgress: 100, workerIds: [], residents: [], shelter: 1 },
-  ]
+  // ── Stage 0: no starter buildings — campfire (heart) only ───────────────────
+  const buildings = []
 
-  // ── Starter roads — diagonal paths from each hut to center ───────────────────
-  const starterPositions = [[-3, 1], [1, -3], [3, 1]]
-  for (const [fc, fr] of starterPositions) {
-    let c = fc, r = fr
-    const maxSteps = Math.abs(c) + Math.abs(r) + 2
-    for (let i = 0; i < maxSteps; i++) {
-      if (c === 0 && r === 0) break
-      const dc = c > 0 ? -1 : c < 0 ? 1 : 0
-      const dr = r > 0 ? -1 : r < 0 ? 1 : 0
-      c += dc; r += dr
-      const tile = tiles.get(key(c, r))
-      if (tile) tile.type = 'path'
-    }
-  }
-
-  // ── Starting citizens — each assigned to one starter house ───────────────────
-  const forager    = makeCitizen('forager',    0, 0)
-  const woodcutter = makeCitizen('woodcutter', 0, 0)
-  const builder    = makeCitizen('builder',    0, 0)
-
-  forager.homeId    = 0;  buildings[0].residents.push(forager.id)
-  woodcutter.homeId = 1;  buildings[1].residents.push(woodcutter.id)
-  builder.homeId    = 2;  buildings[2].residents.push(builder.id)
-
-  const citizens = [forager, woodcutter, builder]
+  // ── Stage 0: single founding citizen, no home yet ────────────────────────────
+  const founder = makeCitizen('worker', 0, 0)
+  const citizens = [founder]
 
   const world = {
     tiles,
@@ -229,7 +206,7 @@ export function createWorld(opts = {}) {
       era:         1,
       col:         0,
       row:         0,
-      fuelTank:    ERA_DEFS[1].fuelMax,
+      fuelTank:    ERA_DEFS[1].fuelMax * 0.5,  // Stage 0: start at 50% fuel
       fuelMax:     ERA_DEFS[1].fuelMax,
       lightRadius: ERA_DEFS[1].lightRadius,
     },
@@ -237,10 +214,10 @@ export function createWorld(opts = {}) {
     buildings,
     citizens,
 
-    // Resources — central stockpile
+    // Resources — central stockpile (Stage 0: start with nothing)
     resources: {
       // Era 1 raw
-      food: 3, wood: 0, stone: 0,
+      food: 0, wood: 0, stone: 0,
       // Era 2 processed
       planks: 0, cut_stone: 0,
       // Era 3 raw + processed
@@ -251,14 +228,14 @@ export function createWorld(opts = {}) {
       uranium: 0,
     },
 
-    // Housing — starts at 3 (one slot per starter hut)
-    housingCapacity: 3,
+    // Housing — Stage 0 starts with none (no houses built yet)
+    housingCapacity: 0,
 
     // Needs tracking
     deficits: { food: 0 },
 
-    // Unlocked building types
-    unlocks: new Set(['house', 'town_center']),
+    // Stage 0: only house is unlocked (town_center etc. unlock with stage progression)
+    unlocks: new Set(['house']),
 
     // Build queue — { type, col, row } entries
     buildQueue: [],
@@ -272,6 +249,19 @@ export function createWorld(opts = {}) {
     // Tick counter
     tick: 0,
     day:  0,   // completed day/night cycles (each cycle = DAY_TICKS + NIGHT_TICKS)
+
+    // Collapse / crisis
+    collapseTimer:   0,
+    collapsed:       false,
+    nuclearCollapse: false,
+
+    // Stage system
+    stage:      0,
+    fireCrisis: false,
+    stability:  100,
+
+    // Log piles scattered from felled trees — [{ col, row, count }]
+    logPiles: [],
 
     // Legacy marker system — tracks rare milestones and earned monument types
     legacy:         new Set(),
@@ -307,7 +297,10 @@ export function revealAround(world, col, row, radius) {
       const k = key(c, ro)
       // Generate tile on demand if not yet in the world
       if (!world.tiles.has(k)) {
-        world.tiles.set(k, { type: generateTileType(c, ro, world.seed, world.lakes, world.rivers) })
+        const type = world.terrainFn
+          ? world.terrainFn(c, ro)
+          : generateTileType(c, ro, world.seed, world.lakes, world.rivers)
+        world.tiles.set(k, { type })
       }
       if (!world.revealedTiles.has(k)) {
         world.revealedTiles.add(k)

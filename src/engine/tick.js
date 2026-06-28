@@ -1,10 +1,11 @@
 // ── Mossgate — Master Tick ─────────────────────────────────────────────────────
 
-import { ERA_DEFS, CYCLE_TICKS } from './config.js'
+import { ERA_DEFS, CYCLE_TICKS, FIRE_CRISIS_THRESHOLD, FIRE_CRISIS_RECOVER } from './config.js'
 import { updateCitizens, spawnNewCitizen } from './citizens.js'
 import { checkUnlocks, updateBuildQueue } from './needs.js'
 import { maybeFireEvent } from './events.js'
 import { addEvent, hasBuilt, key, awardLegacy } from './world.js'
+import { tickStage, checkAdvance } from './stages/stageManager.js'
 
 // ── Helper: check if world has a living (built, not burned) building of type ──
 function has(world, type) { return hasBuilt(world, type) && world.buildings.some(b => b.type === type && b.isBuilt && !b.burned) }
@@ -138,6 +139,18 @@ export function tick(world) {
     }
   }
 
+  // ── Fire crisis — softer warning before full collapse ─────────────────────────
+  // Triggers when fuel is critically low AND there's no wood in the stockpile.
+  const fuelFrac = world.heart.fuelTank / world.heart.fuelMax
+  if (fuelFrac < FIRE_CRISIS_THRESHOLD && (world.resources.wood || 0) === 0) {
+    if (!world.fireCrisis) {
+      world.fireCrisis = true
+      addEvent(world, '🔥 The fire is dying! No wood left — find trees fast!')
+    }
+  } else if (world.fireCrisis && fuelFrac > FIRE_CRISIS_RECOVER) {
+    world.fireCrisis = false
+  }
+
   // Update citizens
   updateCitizens(world)
 
@@ -226,6 +239,9 @@ export function tick(world) {
     }
   }
 
+  // ── Stability — 0–100 composite score driving citizen AI priorities ──────────
+  world.stability = computeStability(world)
+
   // Random world events
   maybeFireEvent(world)
 
@@ -238,4 +254,16 @@ export function tick(world) {
   const ready = world.pendingArrivals.filter(a => a.timer <= 0)
   world.pendingArrivals = world.pendingArrivals.filter(a => a.timer > 0)
   for (const _ of ready) spawnNewCitizen(world)
+
+  // Stage system — per-tick logic and advancement checks
+  tickStage(world, world.tick)
+  checkAdvance(world)
+}
+
+function computeStability(world) {
+  const fuelPct    = world.heart.fuelTank / world.heart.fuelMax
+  const pop        = world.citizens.length
+  const foodPct    = pop > 0 ? Math.min(1, world.resources.food / Math.max(1, pop * 10)) : 1
+  const housingPct = pop > 0 ? Math.min(1, world.housingCapacity / pop) : 1
+  return Math.round(fuelPct * 40 + foodPct * 30 + housingPct * 30)
 }

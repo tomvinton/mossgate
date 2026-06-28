@@ -1,6 +1,7 @@
 // ── Mossgate — Isometric Renderer ─────────────────────────────────────────────
 
 import { TILE_W, TILE_H, UNIT_H, GROUND, TASKS } from '../engine/config.js'
+import { getTileColor } from './styleResolver.js'
 
 const TW2 = TILE_W / 2
 const TH2 = TILE_H / 2
@@ -44,7 +45,7 @@ function diamond(ctx, sx, sy, color, edgeColor = 'rgba(0,0,0,0.15)') {
 
 export function drawTile(ctx, sx, sy, type) {
   if (type === 'forest') {
-    drawForestTile(ctx, sx, sy)
+    drawForestTile(ctx, sx, sy, getTileColor('forest'))
   } else if (type === 'stump') {
     drawStumpTile(ctx, sx, sy)
   } else if (type === 'farmland') {
@@ -84,7 +85,7 @@ export function drawTile(ctx, sx, sy, type) {
   } else if (type === 'legacy_resilience') {
     drawLegacyResilience(ctx, sx, sy)
   } else {
-    diamond(ctx, sx, sy, GROUND[type] || GROUND.grass)
+    diamond(ctx, sx, sy, getTileColor(type) ?? GROUND[type] ?? GROUND.grass)
   }
 }
 
@@ -1098,9 +1099,9 @@ function drawHearth(ctx, sx, sy, fuelFraction) {
   }
 }
 
-function drawForestTile(ctx, sx, sy) {
+function drawForestTile(ctx, sx, sy, floorColor = '#1e3a12') {
   // Dark forest floor
-  diamond(ctx, sx, sy, '#1e3a12', 'rgba(0,0,0,0.2)')
+  diamond(ctx, sx, sy, floorColor, 'rgba(0,0,0,0.2)')
 
   // Tree canopy — compact, designed for dense tiling
   const tx = sx
@@ -1312,14 +1313,47 @@ export function drawFoodSacks(ctx, sx, sy, amount) {
   }
 }
 
+// ── Log piles ──────────────────────────────────────────────────────────────────
+// Drawn as small stacked brown ovals at each log pile position.
+
+export function drawLogPiles(ctx, world, camX, camY, canvasW, canvasH) {
+  for (const pile of (world.logPiles || [])) {
+    if (pile.count <= 0) continue
+    const { sx, sy } = tileToScreen(pile.col, pile.row, camX, camY, canvasW, canvasH)
+    const n = Math.min(pile.count, 3)
+    for (let i = 0; i < n; i++) {
+      ctx.save()
+      ctx.translate(sx + (i - 1) * 7, sy + TH2 - 6 - i * 3)
+      ctx.scale(1, 0.5)
+      ctx.beginPath()
+      ctx.arc(0, 0, 5, 0, Math.PI * 2)
+      ctx.fillStyle = '#8a5c28'
+      ctx.fill()
+      ctx.strokeStyle = '#5a3808'
+      ctx.lineWidth = 1
+      ctx.stroke()
+      ctx.restore()
+    }
+    if (pile.count > 3) {
+      ctx.fillStyle = '#ffe0a0'
+      ctx.font = 'bold 8px sans-serif'
+      ctx.textAlign = 'center'
+      ctx.fillText(`×${pile.count}`, sx, sy + TH2 - 14)
+      ctx.textAlign = 'left'
+    }
+  }
+}
+
 // ── Villager ───────────────────────────────────────────────────────────────────
 
 export function drawVillager(ctx, sx, sy, citizen) {
-  const sleeping = citizen.state === 'sleeping' || citizen.state === 'going_home'
+  const sleeping   = citizen.state === 'sleeping' || citizen.state === 'going_home'
   if (sleeping) ctx.globalAlpha = 0.35
-  const bob      = sleeping ? 0 : Math.sin(citizen.bounce) * 2.5
-  const isGuard  = citizen.role === 'guard'
-  const color    = isGuard ? '#a06040' : ((citizen.task && TASKS[citizen.task]?.color) || '#a8a098')
+  const bob        = sleeping ? 0 : Math.sin(citizen.bounce) * 2.5
+  const isGuard    = citizen.role === 'guard'
+  // Flash amber on odd chop phases to visualise the axe swing
+  const isChopping = citizen.task === 'chop' && citizen.state === 'working' && ((citizen.chopPhase || 0) % 2 === 1)
+  const color      = isGuard ? '#a06040' : isChopping ? '#e8c050' : ((citizen.task && TASKS[citizen.task]?.color) || '#a8a098')
   const px       = sx
   const py       = sy + TH2 - 10 + bob
 

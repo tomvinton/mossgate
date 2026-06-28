@@ -3,13 +3,44 @@
 // (forage / chop / build) based on what the settlement needs most.
 // Specialised roles (farmer, logger, guard, …) come in a later phase.
 
-import { TASKS, BUILDING_DEFS, ARRIVE_MIN_TICKS, ARRIVE_MAX_TICKS, REVEAL_RADIUS } from './config.js'
+import {
+  TASKS, BUILDING_DEFS, ARRIVE_MIN_TICKS, ARRIVE_MAX_TICKS, REVEAL_RADIUS,
+  LOG_COUNT_PER_TREE, LOG_CARRY_COUNT, CHOP_TICKS_PER_CYCLE, STUMP_DECAY_TICKS,
+} from './config.js'
 import { key, makeCitizen, addEvent, revealAround, isLit } from './world.js'
 import { getNightProgress } from './daynight.js'
 
 const MOVE_SPEED  = 0.035   // tiles per tick
 const STOCKPILE   = { x: 0, y: 0 }
 const ARRIVE_DIST = 0.15
+
+// ── Log pile helpers ───────────────────────────────────────────────────────────
+
+function scatterLogs(world, col, row) {
+  const offsets = [[-1, 0], [1, 0], [0, -1], [0, 1], [-1, -1], [1, 1]]
+  let remaining = LOG_COUNT_PER_TREE
+  for (const [dc, dr] of offsets) {
+    if (remaining <= 0) break
+    const c = col + dc, r = row + dr
+    const tile = world.tiles.get(key(c, r))
+    if (tile && tile.type !== 'water' && tile.type !== 'bridge') {
+      const count = Math.min(LOG_CARRY_COUNT, remaining)
+      world.logPiles.push({ col: c, row: r, count })
+      remaining -= count
+    }
+  }
+  if (remaining > 0) world.logPiles.push({ col, row, count: remaining })
+}
+
+function findNearestLogPile(world, cx, cy) {
+  let best = null, bestDist = Infinity
+  for (const p of world.logPiles) {
+    if (p.count <= 0) continue
+    const d = Math.abs(p.col - cx) + Math.abs(p.row - cy)
+    if (d < bestDist) { bestDist = d; best = p }
+  }
+  return best
+}
 
 // ── Farmland expansion ─────────────────────────────────────────────────────────
 // When a farm is completed, flood-fill up to 8 adjacent grass tiles as farmland.
@@ -274,6 +305,12 @@ function pickResourceTask(world) {
 }
 
 function pickTask(citizen, world) {
+  // Fire crisis — drop everything and chop wood for the fire
+  if (world.fireCrisis) return 'chop'
+
+  // Low stability — prioritise survival over construction
+  if ((world.stability ?? 100) < 30) return pickResourceTask(world)
+
   // Only one worker builds at a time to avoid resource race conditions
   const activeBuilder = world.citizens.find(c =>
     c.id !== citizen.id && c.task === 'build' &&
@@ -367,14 +404,45 @@ function updateWorker(citizen, world) {
     case 'going_to_source': {
       const arrived = moveToward(citizen, citizen.targetX, citizen.targetY)
       if (arrived) {
-        citizen.workTimer = TASKS[citizen.task]?.workTicks || 100
-        citizen.state     = 'working'
+        if (citizen.task === 'chop') {
+          citizen.chopPhase = 0
+          citizen.workTimer = CHOP_TICKS_PER_CYCLE
+        } else {
+          citizen.workTimer = TASKS[citizen.task]?.workTicks || 100
+        }
+        citizen.state = 'working'
       }
       break
     }
 
     case 'working': {
       citizen.workTimer--
+
+      if (citizen.task === 'chop') {
+        // 9-cycle chop animation — each cycle flashes the citizen's colour
+        if (citizen.workTimer <= 0) {
+          citizen.chopPhase++
+          if (citizen.chopPhase < LOG_COUNT_PER_TREE) {
+            citizen.workTimer = CHOP_TICKS_PER_CYCLE   // next chop cycle
+          } else {
+            // All 9 chops done — fell the tree
+            const tile = world.tiles.get(citizen.targetTile)
+            if (tile) {
+              tile.type = 'stump'
+              tile.decayAt = world.tick + STUMP_DECAY_TICKS
+              world.bgDirty = true
+            }
+            citizen.chopSite   = { col: Math.round(citizen.targetX), row: Math.round(citizen.targetY) }
+            citizen.targetTile = null
+            citizen.chopPhase  = 0
+            scatterLogs(world, citizen.chopSite.col, citizen.chopSite.row)
+            citizen.state = 'going_to_logs'
+          }
+        }
+        break
+      }
+
+      // All other tasks — original single-trip logic
       if (citizen.workTimer <= 0) {
         const taskDef = TASKS[citizen.task]
         if (taskDef?.chops && citizen.targetTile) {
@@ -404,7 +472,43 @@ function updateWorker(citizen, world) {
         }
         citizen.carrying   = null
         citizen.targetTile = null
-        citizen.state      = 'idle'
+
+        // Log collection loop — return for another trip if nearby logs remain
+        if (citizen.task === 'chop' && citizen.chopSite) {
+          const hasNearbyLogs = world.logPiles.some(p =>
+            p.count > 0 &&
+            Math.abs(p.col - citizen.chopSite.col) <= 4 &&
+            Math.abs(p.row - citizen.chopSite.row) <= 4
+          )
+          if (hasNearbyLogs) { citizen.state = 'going_to_logs'; break }
+          citizen.chopSite = null
+        }
+
+        citizen.state = 'idle'
+      }
+      break
+    }
+
+    case 'going_to_logs': {
+      const pile = findNearestLogPile(world, citizen.x, citizen.y)
+      if (!pile) { citizen.chopSite = null; citizen.task = null; citizen.state = 'idle'; break }
+
+      citizen.targetX = pile.col
+      citizen.targetY = pile.row
+      const arrived = moveToward(citizen, citizen.targetX, citizen.targetY)
+      if (arrived) {
+        // Re-check the pile in case another citizen took it while we walked
+        const p = world.logPiles.find(lp => lp.col === pile.col && lp.row === pile.row && lp.count > 0)
+        if (!p) break  // gone — next tick will pick a different pile
+
+        const take = Math.min(LOG_CARRY_COUNT, p.count)
+        p.count -= take
+        if (p.count <= 0) world.logPiles = world.logPiles.filter(lp => lp !== p)
+
+        citizen.carrying = { resource: 'wood', amount: take }
+        citizen.targetX  = STOCKPILE.x
+        citizen.targetY  = STOCKPILE.y
+        citizen.state    = 'going_to_storage'
       }
       break
     }

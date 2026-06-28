@@ -111,7 +111,7 @@ export const BUILDING_DEFS = {
     label: 'Town Center',
   },
   house: {
-    cost: { wood: 25 }, buildTicks: 300, shelter: 1,
+    cost: { wood: 3 }, buildTicks: 300, shelter: 1,
     workerJob: null, maxWorkers: 0,
     iso: { top: '#d4845a', left: '#a05a30', right: '#8a4a20', h: 1.4 },
     label: 'House',
@@ -293,8 +293,17 @@ export const GROUND = {
   legacy_resilience:     '#2c2c2c',
 }
 
-export const STUMP_DECAY_TICKS = 600
-export const REVEAL_RADIUS     = 10
+export const STUMP_DECAY_TICKS     = 600
+export const REVEAL_RADIUS         = 10
+
+// ── Tree chopping + log system ─────────────────────────────────────────────────
+export const LOG_COUNT_PER_TREE    = 9    // logs scattered when a tree is felled
+export const LOG_CARRY_COUNT       = 3    // logs a citizen can carry per trip
+export const CHOP_TICKS_PER_CYCLE  = 30   // ticks per chop animation cycle (9 cycles total)
+
+// ── Fire crisis ────────────────────────────────────────────────────────────────
+export const FIRE_CRISIS_THRESHOLD = 0.15  // fuelTank fraction below which crisis begins
+export const FIRE_CRISIS_RECOVER   = 0.25  // fuelTank fraction at which crisis clears
 
 // ── Day / Night cycle ──────────────────────────────────────────────────────────
 // Time scale (at 1× speed, 20 ticks/sec):

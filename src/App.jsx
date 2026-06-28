@@ -214,11 +214,14 @@ function Calibration({ onClose }) {
 }
 
 // ── Main component ─────────────────────────────────────────────────────────────
-import { createWorld, revealAround } from './engine/world.js'
+import { revealAround } from './engine/world.js'
+import { buildWorld } from './engine/worldCompositor.js'
+import { seedToWorld } from './engine/seed.js'
+import { getBuildingIso } from './render/styleResolver.js'
 import { tick }                     from './engine/tick.js'
 import { createCamera, updateCamera, updateZoom, panCamera } from './render/camera.js'
 import { getNightProgress, makeStars }           from './engine/daynight.js'
-import { tileToScreen, drawTile, drawBox, drawVillager, drawWoodPile, drawFoodSacks, drawHeart } from './render/iso.js'
+import { tileToScreen, drawTile, drawBox, drawVillager, drawWoodPile, drawFoodSacks, drawHeart, drawLogPiles } from './render/iso.js'
 import { BUILDING_DEFS, TICK_MS, ERA_DEFS, TILE_H, CYCLE_TICKS, DAY_TICKS, NIGHT_TICKS, DUSK_TICKS } from './engine/config.js'
 import { fireRandomEvent } from './engine/events.js'
 
@@ -269,7 +272,9 @@ export default function App() {
   const forceCollapse = () => { if (worldRef.current) worldRef.current.collapsed = true }
 
   useEffect(() => {
-    const world  = createWorld()
+    const initSeed = Math.random() * 99999
+    const initIds  = seedToWorld(initSeed)
+    const world    = buildWorld(initIds.layoutId, initIds.eraId, initIds.cultureId, initIds.biomeId, initSeed)
     worldRef.current  = world
     cameraRef.current = createCamera()
 
@@ -318,7 +323,9 @@ export default function App() {
           }, 200)
         }
 
-        const newWorld = createWorld({ nuclearRevealed: prevReveal })
+        const newSeed = Math.random() * 99999
+        const newIds  = seedToWorld(newSeed)
+        const newWorld = buildWorld(newIds.layoutId, newIds.eraId, newIds.cultureId, newIds.biomeId, newSeed, { nuclearRevealed: prevReveal })
         worldRef.current  = newWorld
         sortedKeysRef.current = null
         lastRevealRef.current = { x: null, y: null, zoom: null }
@@ -429,7 +436,7 @@ export default function App() {
           const b = builtAt.get(k)
           if (b) {
             const def = BUILDING_DEFS[b.type]?.iso
-            if (def) drawBox(bgCtx, sx, sy, def, 100)
+            if (def) drawBox(bgCtx, sx, sy, getBuildingIso(b.type) ?? def, 100)
           }
         }
 
@@ -457,7 +464,7 @@ export default function App() {
       for (const b of underConstruction) {
         const { sx, sy } = tileToScreen(b.col, b.row, camera.x, camera.y, W, H)
         const def = BUILDING_DEFS[b.type]?.iso
-        if (def) drawBox(ctx, sx, sy, def, b.buildProgress)
+        if (def) drawBox(ctx, sx, sy, getBuildingIso(b.type) ?? def, b.buildProgress)
       }
 
       // Resource stockpile at center tile (offset left; heart occupies center)
@@ -468,6 +475,9 @@ export default function App() {
       // Heart — campfire (Era 1) drawn on top of the nuclear ruin tile
       const fuelFrac = world.heart.fuelTank / world.heart.fuelMax
       drawHeart(ctx, csx, csy, world.heart.era, fuelFrac)
+
+      // Log piles scattered from felled trees
+      drawLogPiles(ctx, world, camera.x, camera.y, W, H)
 
       // Citizens — zoom-correct culling
       const cHW = W / (2 * zoom) + 80, cHH = H / (2 * zoom) + 80
