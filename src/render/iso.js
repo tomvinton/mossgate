@@ -1208,6 +1208,20 @@ export function drawBox(ctx, sx, sy, def, progress = 100) {
   }
 }
 
+// ── Chimney (house upgrade) ───────────────────────────────────────────────────
+
+export function drawChimney(ctx, sx, sy) {
+  const cx = sx + 6, cy = sy - 24
+  ctx.fillStyle = '#6a4830'
+  ctx.fillRect(cx - 3, cy - 10, 6, 10)
+  ctx.fillStyle = '#2a1a0a'
+  ctx.fillRect(cx - 2, cy - 10, 4, 3)
+  ctx.fillStyle = '#4a3020'
+  ctx.fillRect(cx + 3, cy - 9, 2, 9)
+  ctx.fillStyle = '#8a6040'
+  ctx.fillRect(cx - 4, cy - 11, 8, 2)
+}
+
 // ── Resource stockpile visuals ────────────────────────────────────────────────
 // Both functions receive the tile's top-of-diamond (sx, sy) and the resource amount.
 // The left side of the tile is used for wood, the right for food.
@@ -1347,9 +1361,7 @@ export function drawLogPiles(ctx, world, camX, camY, canvasW, canvasH) {
 // ── Villager ───────────────────────────────────────────────────────────────────
 
 export function drawVillager(ctx, sx, sy, citizen) {
-  const sleeping   = citizen.state === 'sleeping' || citizen.state === 'going_home'
-  if (sleeping) ctx.globalAlpha = 0.35
-  const bob        = sleeping ? 0 : Math.sin(citizen.bounce) * 2.5
+  const bob        = Math.sin(citizen.bounce) * 2.5
   const isGuard    = citizen.role === 'guard'
   // Flash amber on odd chop phases to visualise the axe swing
   const isChopping = citizen.task === 'chop' && citizen.state === 'working' && ((citizen.chopPhase || 0) % 2 === 1)
@@ -1389,8 +1401,6 @@ export function drawVillager(ctx, sx, sy, citizen) {
     ctx.lineWidth = 0.6
     ctx.stroke()
   }
-
-  if (sleeping) { ctx.globalAlpha = 1; return }
 
   // Carrying indicator (workers only)
   if (!isGuard && citizen.carrying) {

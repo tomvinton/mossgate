@@ -130,6 +130,54 @@ export function buildWorld(layoutId, eraId, cultureId, biomeId, seed, opts = {})
     newBuilding:    null,
     bgDirty:        true,
     revealedTiles:  new Set(),
+
+    // ── Season system ──────────────────────────────────────────────────────────
+    season:     'spring',
+    seasonTick: 0,
+    year:       1,
+
+    // ── Scout system (Stage 2) ─────────────────────────────────────────────────
+    scout:        { active: false, reportTimer: 0 },
+    scoutReports: [],
+
+    // ── Caravan (Stage 3) ──────────────────────────────────────────────────────
+    caravan: null,
+
+    // ── Culture (Stage 3) ──────────────────────────────────────────────────────
+    culture: { clothingPattern: null },
+
+    // ── Stage 4 tracking ──────────────────────────────────────────────────────
+    winterWarning:     false,
+    winterRequirement: null,
+    _equilibriumTicks: 0,
+
+    // ── Stage 5 ────────────────────────────────────────────────────────────────
+    mineDiscovery:  false,
+    _mineBuiltTick: 0,
+
+    // ── Stage 6 ────────────────────────────────────────────────────────────────
+    researchPoints: 0,
+    farmsDormant:   false,
+
+    // ── Stage 7 seasonal bonuses ───────────────────────────────────────────────
+    farmProductivityBonus: 1.0,
+    citizenSpeedBonus:     1.0,
+    citizenSpeedPenalty:   1.0,
+    _wintersCompleted:     0,
+
+    // ── Stage 8 challenge (seeded so same world always gets same challenge) ────
+    challengeType:       ['flood', 'harsh_winter', 'raiders'][Math.floor(seed % 3)],
+    challengeScore:      0,
+    challengeResolved:   false,
+    _challengeActive:    false,
+    _challengeStartTick: 0,
+    _foreshadowCount:    0,
+    raiders:             [],
+
+    // ── Stage 9 endgame ────────────────────────────────────────────────────────
+    endgame:            false,
+    ngPlusUnlocked:     false,
+    secretModeUnlocked: false,
   }
 
   // Initial fog-of-war reveal around the heart

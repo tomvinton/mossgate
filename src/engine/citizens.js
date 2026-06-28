@@ -7,8 +7,8 @@ import {
   TASKS, BUILDING_DEFS, ARRIVE_MIN_TICKS, ARRIVE_MAX_TICKS, REVEAL_RADIUS,
   LOG_COUNT_PER_TREE, LOG_CARRY_COUNT, CHOP_TICKS_PER_CYCLE, STUMP_DECAY_TICKS,
 } from './config.js'
-import { key, makeCitizen, addEvent, revealAround, isLit } from './world.js'
-import { getNightProgress } from './daynight.js'
+import { key, makeCitizen, addEvent, revealAround, isLit, hasTileType } from './world.js'
+import { findPath } from './pathfind.js'
 
 const MOVE_SPEED  = 0.035   // tiles per tick
 const STOCKPILE   = { x: 0, y: 0 }
@@ -25,11 +25,11 @@ function scatterLogs(world, col, row) {
     const tile = world.tiles.get(key(c, r))
     if (tile && tile.type !== 'water' && tile.type !== 'bridge') {
       const count = Math.min(LOG_CARRY_COUNT, remaining)
-      world.logPiles.push({ col: c, row: r, count })
+      world.logPiles.push({ col: c, row: r, count, decayAt: world.tick + 2000 })
       remaining -= count
     }
   }
-  if (remaining > 0) world.logPiles.push({ col, row, count: remaining })
+  if (remaining > 0) world.logPiles.push({ col, row, count: remaining, decayAt: world.tick + 2000 })
 }
 
 function findNearestLogPile(world, cx, cy) {
@@ -131,7 +131,7 @@ function layRoadToNearest(world, fromCol, fromRow) {
 
 // ── Movement ───────────────────────────────────────────────────────────────────
 
-function moveToward(citizen, tx, ty) {
+function moveToward(citizen, tx, ty, speed = MOVE_SPEED) {
   const dx = tx - citizen.x
   const dy = ty - citizen.y
   const dist = Math.sqrt(dx * dx + dy * dy)
@@ -140,9 +140,25 @@ function moveToward(citizen, tx, ty) {
     citizen.y = ty
     return true
   }
-  citizen.x += (dx / dist) * MOVE_SPEED
-  citizen.y += (dy / dist) * MOVE_SPEED
+  citizen.x += (dx / dist) * speed
+  citizen.y += (dy / dist) * speed
   return false
+}
+
+// Follow the citizen's precomputed A* path waypoint by waypoint.
+// Falls back to direct movement if path is empty (no path found or early game).
+function moveAlongPath(citizen, speed = MOVE_SPEED) {
+  if (!citizen.path || citizen.pathIdx >= citizen.path.length) {
+    return moveToward(citizen, citizen.targetX, citizen.targetY, speed)
+  }
+  const wp = citizen.path[citizen.pathIdx]
+  const arrived = moveToward(citizen, wp.col, wp.row, speed)
+  if (arrived) citizen.pathIdx++
+  return citizen.pathIdx >= citizen.path.length
+}
+
+function computePath(world, fromC, fromR, toC, toR) {
+  return findPath(world.tiles, world.buildings, fromC, fromR, toC, toR)
 }
 
 // ── Forest tile targeting ──────────────────────────────────────────────────────
@@ -191,61 +207,20 @@ export function assignHome(citizen, world) {
   citizen.homeId = null
 }
 
-function shouldGoHome(world) { return getNightProgress(world.tick) > 0.82 }
-function shouldWake(world)   { return getNightProgress(world.tick) < 0.12 }
-
-function tryGoHome(citizen, world) {
-  if (!shouldGoHome(world)) return false
-  if (citizen.homeId == null) return false
-  const home = world.buildings.find(b => b.id === citizen.homeId && b.isBuilt && !b.burned)
-  if (!home) {
-    citizen.homeId = null   // home was burned down — clear reference
-    return false
-  }
-  citizen.state   = 'going_home'
-  citizen.targetX = home.col
-  citizen.targetY = home.row
-  return true
-}
-
 // ── Guard behaviour ────────────────────────────────────────────────────────────
-// Guards skip the normal worker loop. At night they patrol the lit perimeter;
-// during the day they rest near the center.
+// Guards rest near the center during the day; pick a new loiter spot occasionally.
 
 function updateGuard(citizen, world) {
-  const night = getNightProgress(world.tick)
-
-  if (night > 0.3) {
-    // Night / dusk — patrol points on the light radius perimeter
-    const atTarget = Math.hypot(citizen.x - citizen.targetX, citizen.y - citizen.targetY) < ARRIVE_DIST
-    if (citizen.state !== 'guard_patrol' || atTarget) {
-      const angle = Math.random() * Math.PI * 2
-      const r = Math.max(3, world.heart.lightRadius * 0.80)
-      citizen.targetX = Math.cos(angle) * r
-      citizen.targetY = Math.sin(angle) * r
-      citizen.state   = 'guard_patrol'
+  citizen.task = null
+  if (citizen.state === 'guard_rest') {
+    const arrived = moveToward(citizen, citizen.targetX, citizen.targetY)
+    if (arrived && Math.random() < 0.004) {
+      citizen.targetX = (Math.random() - 0.5) * 5
+      citizen.targetY = (Math.random() - 0.5) * 5
     }
-    moveToward(citizen, citizen.targetX, citizen.targetY)
-    citizen.task    = 'guard'
-    citizen.carrying = null
   } else {
-    // Day — rest near center; pick a new loiter spot occasionally
-    citizen.task = null
-    if (citizen.state === 'guard_patrol') {
-      // Just came off night patrol — pick a daytime loiter spot
-      citizen.targetX = (Math.random() - 0.5) * 4
-      citizen.targetY = (Math.random() - 0.5) * 4
-      citizen.state   = 'guard_rest'
-    } else if (citizen.state === 'guard_rest') {
-      const arrived = moveToward(citizen, citizen.targetX, citizen.targetY)
-      if (arrived && Math.random() < 0.004) {
-        citizen.targetX = (Math.random() - 0.5) * 5
-        citizen.targetY = (Math.random() - 0.5) * 5
-      }
-    } else {
-      citizen.state   = 'guard_rest'
-      citizen.targetX = 0; citizen.targetY = 0
-    }
+    citizen.state   = 'guard_rest'
+    citizen.targetX = 0; citizen.targetY = 0
   }
 }
 
@@ -257,7 +232,7 @@ function pickResourceTask(world) {
 
   // Era 6: clean up contamination first, then sustain
   if (era >= 6) {
-    const hasContam = [...world.tiles.values()].some(t => t.type === 'contamination')
+    const hasContam = hasTileType(world, 'contamination')
     if (hasContam) return 'decontaminate'
     return r.food < 30 ? 'forage' : 'chop'
   }
@@ -326,16 +301,16 @@ function startBuild(citizen, world) {
   if (!world.buildQueue.length) return false
 
   const item = world.buildQueue[0]
-  const cost = item.cost || BUILDING_DEFS[item.type]?.cost || {}
 
-  for (const [res, amt] of Object.entries(cost)) {
-    if ((world.resources[res] || 0) < amt) return false  // can't afford yet
+  if (!item.costPrepaid) {
+    // Legacy path: check and deduct cost at build time
+    const cost = item.cost || BUILDING_DEFS[item.type]?.cost || {}
+    for (const [res, amt] of Object.entries(cost)) {
+      if ((world.resources[res] || 0) < amt) return false
+    }
+    for (const [res, amt] of Object.entries(cost)) world.resources[res] -= amt
   }
 
-  // Deduct cost and remove from queue
-  for (const [res, amt] of Object.entries(cost)) {
-    world.resources[res] -= amt
-  }
   world.buildQueue.shift()
 
   const id = world.buildings.length
@@ -347,6 +322,8 @@ function startBuild(citizen, world) {
   citizen.buildTarget = { col: item.col, row: item.row, buildingId: id }
   citizen.targetX     = item.col
   citizen.targetY     = item.row
+  citizen.path        = computePath(world, Math.round(citizen.x), Math.round(citizen.y), item.col, item.row)
+  citizen.pathIdx     = 0
   citizen.state       = 'going_to_build'
   return true
 }
@@ -357,22 +334,12 @@ function updateWorker(citizen, world) {
   // Guards have their own behaviour — skip the normal worker state machine
   if (citizen.role === 'guard') { updateGuard(citizen, world); return }
 
+  // Effective speed: base × seasonal bonus × food-crisis penalty
+  const spd = MOVE_SPEED * (world.citizenSpeedBonus ?? 1) * (world.citizenSpeedPenalty ?? 1)
+
   switch (citizen.state) {
 
-    case 'going_home': {
-      const arrived = moveToward(citizen, citizen.targetX, citizen.targetY)
-      if (arrived) citizen.state = 'sleeping'
-      return
-    }
-
-    case 'sleeping': {
-      if (shouldWake(world)) { citizen.task = null; citizen.state = 'idle' }
-      return
-    }
-
     case 'idle': {
-      if (tryGoHome(citizen, world)) return
-
       citizen.task = pickTask(citizen, world)
 
       if (citizen.task === 'build') {
@@ -397,12 +364,14 @@ function updateWorker(citizen, world) {
       citizen.targetTile = target.key
       citizen.targetX    = target.col
       citizen.targetY    = target.row
+      citizen.path       = computePath(world, Math.round(citizen.x), Math.round(citizen.y), target.col, target.row)
+      citizen.pathIdx    = 0
       citizen.state      = 'going_to_source'
       break
     }
 
     case 'going_to_source': {
-      const arrived = moveToward(citizen, citizen.targetX, citizen.targetY)
+      const arrived = moveAlongPath(citizen, spd)
       if (arrived) {
         if (citizen.task === 'chop') {
           citizen.chopPhase = 0
@@ -463,7 +432,7 @@ function updateWorker(citizen, world) {
     }
 
     case 'going_to_storage': {
-      const arrived = moveToward(citizen, citizen.targetX, citizen.targetY)
+      const arrived = moveToward(citizen, citizen.targetX, citizen.targetY, spd)
       if (arrived && citizen.carrying) {
         // null resource tasks (decontaminate) have no yield to deposit
         if (citizen.carrying.resource) {
@@ -495,7 +464,7 @@ function updateWorker(citizen, world) {
 
       citizen.targetX = pile.col
       citizen.targetY = pile.row
-      const arrived = moveToward(citizen, citizen.targetX, citizen.targetY)
+      const arrived = moveToward(citizen, citizen.targetX, citizen.targetY, spd)
       if (arrived) {
         // Re-check the pile in case another citizen took it while we walked
         const p = world.logPiles.find(lp => lp.col === pile.col && lp.row === pile.row && lp.count > 0)
@@ -514,7 +483,7 @@ function updateWorker(citizen, world) {
     }
 
     case 'going_to_build': {
-      const arrived = moveToward(citizen, citizen.targetX, citizen.targetY)
+      const arrived = moveAlongPath(citizen, spd)
       if (arrived) {
         const bt  = citizen.buildTarget
         const bld = bt ? world.buildings[bt.buildingId] : null
@@ -553,6 +522,7 @@ function updateWorker(citizen, world) {
         world.bgDirty     = true   // building is now in the bg layer
         revealAround(world, bld.col, bld.row, REVEAL_RADIUS)
         if (bld.type === 'farm') expandFarmland(world, bld)
+        if (bld.type === 'mine') world._mineBuiltTick = world.tick
         layRoadToCenter(world, bld.col, bld.row)
         layRoadToNearest(world, bld.col, bld.row)
 

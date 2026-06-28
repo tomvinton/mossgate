@@ -105,37 +105,37 @@ export const JOBS = {
 export const BUILDING_DEFS = {
   // ── Era 1: Tribal ──────────────────────────────────────────────────────────
   town_center: {
-    cost: { wood: 20 }, buildTicks: 500, shelter: 0,
+    cost: { wood: 50 }, buildTicks: 500, shelter: 0,
     workerJob: null, maxWorkers: 0,
     iso: { top: '#d4a84a', left: '#a07820', right: '#805808', h: 2.8 },
     label: 'Town Center',
   },
   house: {
-    cost: { wood: 3 }, buildTicks: 300, shelter: 1,
+    cost: { wood: 15 }, buildTicks: 300, shelter: 1,
     workerJob: null, maxWorkers: 0,
     iso: { top: '#d4845a', left: '#a05a30', right: '#8a4a20', h: 1.4 },
     label: 'House',
   },
   farm: {
-    cost: { wood: 5 }, buildTicks: 300, shelter: 0,
+    cost: { wood: 20 }, buildTicks: 300, shelter: 0,
     workerJob: 'farmer', maxWorkers: 2,
     iso: { top: '#6a9a3a', left: '#4a7a1a', right: '#3a6a0a', h: 0.4 },
     label: 'Farm',
   },
   logging_camp: {
-    cost: { wood: 6 }, buildTicks: 250, shelter: 0,
+    cost: { wood: 25 }, buildTicks: 250, shelter: 0,
     workerJob: 'logger', maxWorkers: 2,
     iso: { top: '#8a6030', left: '#5a3810', right: '#4a2808', h: 1.0 },
     label: 'Logging Camp',
   },
   granary: {
-    cost: { wood: 12 }, buildTicks: 400, shelter: 0,
+    cost: { wood: 30 }, buildTicks: 400, shelter: 0,
     workerJob: null, maxWorkers: 0,
     iso: { top: '#e8c040', left: '#b89010', right: '#987800', h: 1.8 },
     label: 'Granary',
   },
   well: {
-    cost: { wood: 4 }, buildTicks: 150, shelter: 0,
+    cost: { wood: 20 }, buildTicks: 150, shelter: 0,
     workerJob: null, maxWorkers: 0,
     iso: { top: '#9a9a8a', left: '#6a6a5a', right: '#5a5a4a', h: 0.6 },
     label: 'Well',
@@ -215,6 +215,26 @@ export const BUILDING_DEFS = {
     label: 'Nuclear Plant',
   },
 
+  // ── Stage 5: Stone Age buildings ──────────────────────────────────────────
+  mine: {
+    cost: { wood: 15, stone: 5 }, buildTicks: 350, shelter: 0,
+    workerJob: null, maxWorkers: 0,
+    iso: { top: '#5a5248', left: '#3a3228', right: '#2a2218', h: 1.2 },
+    label: 'Mine',
+  },
+  research_building: {
+    cost: { wood: 20, stone: 10 }, buildTicks: 400, shelter: 0,
+    workerJob: null, maxWorkers: 0,
+    iso: { top: '#6a7858', left: '#4a5838', right: '#3a4828', h: 1.6 },
+    label: 'Research Hall',
+  },
+  trophy: {
+    cost: {}, buildTicks: 1, shelter: 0,
+    workerJob: null, maxWorkers: 0,
+    iso: { top: '#d4b840', left: '#a08820', right: '#806800', h: 0.8 },
+    label: 'Victory Trophy',
+  },
+
   // ── Era 6: Clean ───────────────────────────────────────────────────────────
   solar_farm: {
     cost: { steel: 20, cut_stone: 12 }, buildTicks: 400, shelter: 0,
@@ -252,6 +272,9 @@ export const UNLOCK_CONDITIONS = {
   power_station:   (w) => w.era >= 4 && w.resources.steel >= 10,
   // Era 5
   nuclear_plant:   (w) => w.era >= 4 && w.resources.steel >= 30,
+  // Stage 5 buildings
+  mine:              (w) => w.stage >= 5,
+  research_building: (w) => w.mineDiscovery === true,
   // Era 6
   solar_farm:      (w) => w.era >= 6,
   decontam_center: (w) => w.nuclearRevealed,
@@ -296,8 +319,12 @@ export const GROUND = {
 export const STUMP_DECAY_TICKS     = 600
 export const REVEAL_RADIUS         = 10
 
+// ── Season system ──────────────────────────────────────────────────────────────
+export const SEASON_LENGTH = 72000   // ticks per season (3 min at 20× dev speed; 1 hr at 1×)
+export const SEASONS       = ['spring', 'summer', 'fall', 'winter']
+
 // ── Tree chopping + log system ─────────────────────────────────────────────────
-export const LOG_COUNT_PER_TREE    = 9    // logs scattered when a tree is felled
+export const LOG_COUNT_PER_TREE    = 12   // logs scattered when a tree is felled (4 trips)
 export const LOG_CARRY_COUNT       = 3    // logs a citizen can carry per trip
 export const CHOP_TICKS_PER_CYCLE  = 30   // ticks per chop animation cycle (9 cycles total)
 

@@ -1,10 +1,10 @@
 // ── Mossgate — Master Tick ─────────────────────────────────────────────────────
 
-import { ERA_DEFS, CYCLE_TICKS, FIRE_CRISIS_THRESHOLD, FIRE_CRISIS_RECOVER } from './config.js'
+import { ERA_DEFS, CYCLE_TICKS, FIRE_CRISIS_THRESHOLD, FIRE_CRISIS_RECOVER, SEASON_LENGTH, SEASONS } from './config.js'
 import { updateCitizens, spawnNewCitizen } from './citizens.js'
 import { checkUnlocks, updateBuildQueue } from './needs.js'
 import { maybeFireEvent } from './events.js'
-import { addEvent, hasBuilt, key, awardLegacy } from './world.js'
+import { addEvent, hasBuilt, key, awardLegacy, hasTileType } from './world.js'
 import { tickStage, checkAdvance } from './stages/stageManager.js'
 
 // ── Helper: check if world has a living (built, not burned) building of type ──
@@ -151,6 +151,92 @@ export function tick(world) {
     world.fireCrisis = false
   }
 
+  // ── Season advancement ────────────────────────────────────────────────────
+  world.seasonTick = (world.seasonTick || 0) + 1
+  if (world.seasonTick >= SEASON_LENGTH) {
+    world.seasonTick = 0
+    const idx    = SEASONS.indexOf(world.season || 'spring')
+    world.season = SEASONS[(idx + 1) % 4]
+    if (world.season === 'spring') world.year = (world.year || 1) + 1
+    addEvent(world, `${world.season.charAt(0).toUpperCase() + world.season.slice(1)} begins.`)
+  }
+
+  // ── Farm food production (passive; respects dormancy + seasonal bonus) ────
+  if (world.tick % 400 === 0 && !world.farmsDormant) {
+    const farms = world.buildings.filter(b => b.type === 'farm' && b.isBuilt && !b.burned).length
+    if (farms > 0) {
+      world.resources.food = (world.resources.food || 0) + Math.round(farms * 3 * (world.farmProductivityBonus ?? 1))
+    }
+  }
+
+  // ── Mine stone production ─────────────────────────────────────────────────
+  if (world.tick % 200 === 0) {
+    const mines = world.buildings.filter(b => b.type === 'mine' && b.isBuilt && !b.burned).length
+    if (mines > 0) world.resources.stone = (world.resources.stone || 0) + mines
+  }
+
+  // ── Mine discovery (fires 200 ticks after first mine is built) ────────────
+  if (!world.mineDiscovery && world._mineBuiltTick > 0 && world.tick - world._mineBuiltTick >= 200) {
+    world.mineDiscovery = true
+    addEvent(world, 'Miners find signs of deeper ore. A research hall could study this.')
+  }
+
+  // ── Research ticking (Stage 6+) ───────────────────────────────────────────
+  if (world.stage >= 6 && world.tick % 20 === 0) {
+    if (world.buildings.some(b => b.type === 'research_building' && b.isBuilt && !b.burned)) {
+      world.researchPoints = (world.researchPoints || 0) + 1
+      world.resources.food = Math.max(0, (world.resources.food || 0) - 0.4)
+    }
+  }
+
+  // ── Equilibrium tracking (Stage 4) ───────────────────────────────────────
+  if (world.stage === 4) {
+    const farmRate = world.buildings.filter(b => b.type === 'farm' && b.isBuilt).length * 3 / 400
+    const eatRate  = world.citizens.length / 400
+    if (farmRate > eatRate && (world.resources.wood || 0) > 5)
+      world._equilibriumTicks = (world._equilibriumTicks || 0) + 1
+    else
+      world._equilibriumTicks = Math.max(0, (world._equilibriumTicks || 0) - 1)
+  }
+
+  // ── Caravan movement ──────────────────────────────────────────────────────
+  if (world.caravan) {
+    const cv = world.caravan
+    cv.bounce = (cv.bounce || 0) + 0.18
+    if (cv.state === 'arriving') {
+      const dx = -cv.x, dy = -cv.y
+      const dist = Math.sqrt(dx * dx + dy * dy)
+      if (dist < 0.2) {
+        cv.state = 'waiting'; cv.timer = 200
+        world.resources.wood = (world.resources.wood || 0) + 20
+        world.resources.food = (world.resources.food || 0) + 10
+        addEvent(world, 'Caravan delivers 20 wood and 10 food.')
+      } else { cv.x += (dx / dist) * 0.025; cv.y += (dy / dist) * 0.025 }
+    } else if (cv.state === 'waiting') {
+      if (--cv.timer <= 0) cv.state = 'leaving'
+    } else {
+      const tx = Math.cos(cv._angle || 0) * 16, ty = Math.sin(cv._angle || 0) * 16
+      const dx = tx - cv.x, dy = ty - cv.y, dist = Math.sqrt(dx * dx + dy * dy)
+      if (dist < 0.5) world.caravan = null
+      else { cv.x += (dx / dist) * 0.025; cv.y += (dy / dist) * 0.025 }
+    }
+  }
+
+  // ── Tile Map pruning — remove unrevealed unmodified tiles (every 1000 ticks) ─
+  if (world.tick % 1000 === 0) {
+    const buildingKeys = new Set(world.buildings.map(b => `${b.col},${b.row}`))
+    const SAFE = new Set(['grass', 'forest', 'water', 'rock', 'coal_seam', 'iron_deposit', 'uranium_ore'])
+    let pruned = 0
+    for (const [k, t] of world.tiles) {
+      if (pruned >= 5000) break
+      if (world.revealedTiles.has(k)) continue
+      if (buildingKeys.has(k)) continue
+      if (!SAFE.has(t.type) || t.decayAt) continue
+      world.tiles.delete(k)
+      pruned++
+    }
+  }
+
   // Update citizens
   updateCitizens(world)
 
@@ -163,6 +249,22 @@ export function tick(world) {
         t.type = 'grass'; delete t.decayAt; world.bgDirty = true
       }
     }
+    // Remove log piles whose decayAt has passed (unreachable/uncollected piles)
+    if (world.logPiles.some(p => p.decayAt && world.tick >= p.decayAt)) {
+      world.logPiles = world.logPiles.filter(p => !p.decayAt || world.tick < p.decayAt)
+    }
+  }
+
+  // ── Diagnostics — logged every 100 ticks to monitor world object growth ───
+  if (world.tick % 100 === 0) {
+    const total = world.citizens.length + world.buildings.length
+      + world.logPiles.length + world.tiles.size
+    console.log(
+      `[day ${world.day || 0} t${world.tick}] ` +
+      `citizens:${world.citizens.length} buildings:${world.buildings.length} ` +
+      `logs:${world.logPiles.length} tiles:${world.tiles.size} ` +
+      `revealed:${world.revealedTiles.size} total:${total}`
+    )
   }
 
   // ── Processing buildings (every 150 ticks) ────────────────────────────────
@@ -232,7 +334,7 @@ export function tick(world) {
 
   // Era 6 unlocks after nuclear reveal + all contamination cleaned
   if (era < 6 && world.nuclearRevealed && world.tick % 200 === 0) {
-    const hasContam = [...world.tiles.values()].some(t => t.type === 'contamination')
+    const hasContam = hasTileType(world, 'contamination')
     if (!hasContam && has(world, 'decontam_center')) {
       transitionEra(world, 6, {}, '🌞 Era VI: Clean Age. The world breathes again.')
       awardLegacy(world, 'legacy_arc', '🏛️ The Survivor Stone was raised. This civilization endured.')

@@ -36,162 +36,145 @@ function canAfford(world, type) {
   return Object.entries(cost).every(([res, amt]) => (world.resources[res] || 0) >= amt)
 }
 
+// Deduct cost immediately and push to queue. This prevents auto-refuel from
+// consuming wood that has been earmarked for construction between queue and build.
+function queueBuild(world, type, site, msg) {
+  const cost = BUILDING_DEFS[type]?.cost || {}
+  for (const [res, amt] of Object.entries(cost)) {
+    world.resources[res] = (world.resources[res] || 0) - amt
+  }
+  world.buildQueue.push({ type, ...site, costPrepaid: true })
+  addEvent(world, msg)
+}
+
 export function updateBuildQueue(world) {
   // Don't pile up — only queue one thing at a time
   if (world.buildQueue.length > 0) return
 
-  const pop     = world.citizens.length
-  const wood    = world.resources.wood
+  const pop      = world.citizens.length
+  const wood     = world.resources.wood
   const headroom = world.housingCapacity - pop
 
   // Priority 0: Town center — build one first, it's the heart of the settlement
   if (world.unlocks.has('town_center') && !hasBuilt(world, 'town_center') && wood >= BUILDING_DEFS.town_center.cost.wood) {
     const site = findBuildSite(world, 'town_center')
-    if (site) {
-      world.buildQueue.push({ type: 'town_center', ...site })
-      addEvent(world, 'Builder planning a town center')
-      return
-    }
+    if (site) { queueBuild(world, 'town_center', site, 'Builder planning a town center'); return }
   }
 
   // Priority 1: Housing — if population is at or near housing cap
   if (headroom <= 1 && world.unlocks.has('house') && wood >= BUILDING_DEFS.house.cost.wood) {
     const site = findBuildSite(world, 'house')
-    if (site) {
-      world.buildQueue.push({ type: 'house', ...site })
-      addEvent(world, 'Builder planning a house')
-      return
-    }
+    if (site) { queueBuild(world, 'house', site, 'Builder planning a house'); return }
   }
 
   // Priority 2: Farm — if unlocked and none built yet
   if (world.unlocks.has('farm') && !hasBuilt(world, 'farm') && wood >= BUILDING_DEFS.farm.cost.wood) {
     const site = findBuildSite(world, 'farm')
-    if (site) {
-      world.buildQueue.push({ type: 'farm', ...site })
-      addEvent(world, 'Builder planning a farm')
-      return
-    }
+    if (site) { queueBuild(world, 'farm', site, 'Builder planning a farm'); return }
   }
 
   // Priority 3: Logging camp — if unlocked and none built
   if (world.unlocks.has('logging_camp') && !hasBuilt(world, 'logging_camp') && wood >= BUILDING_DEFS.logging_camp.cost.wood) {
     const site = findBuildSite(world, 'logging_camp')
-    if (site) {
-      world.buildQueue.push({ type: 'logging_camp', ...site })
-      addEvent(world, 'Builder planning a logging camp')
-      return
-    }
+    if (site) { queueBuild(world, 'logging_camp', site, 'Builder planning a logging camp'); return }
   }
 
   // Priority 4: Granary
   if (world.unlocks.has('granary') && !hasBuilt(world, 'granary') && wood >= BUILDING_DEFS.granary.cost.wood) {
     const site = findBuildSite(world, 'granary')
-    if (site) {
-      world.buildQueue.push({ type: 'granary', ...site })
-      addEvent(world, 'Builder planning a granary')
-      return
-    }
+    if (site) { queueBuild(world, 'granary', site, 'Builder planning a granary'); return }
+  }
+
+  // Priority 4b: Mine (Stage 5+)
+  if (world.unlocks.has('mine') && !hasBuilt(world, 'mine') && canAfford(world, 'mine')) {
+    const site = findBuildSite(world, 'mine')
+    if (site) { queueBuild(world, 'mine', site, 'Builder planning a mine'); return }
+  }
+
+  // Priority 4c: Research Hall (after mine discovery)
+  if (world.unlocks.has('research_building') && !hasBuilt(world, 'research_building') && canAfford(world, 'research_building')) {
+    const site = findBuildSite(world, 'research_building')
+    if (site) { queueBuild(world, 'research_building', site, 'Builder planning a research hall'); return }
   }
 
   // Priority 5: Era 2 processing buildings — sawmill before stonemason
   if (world.unlocks.has('sawmill') && !hasBuilt(world, 'sawmill') && canAfford(world, 'sawmill')) {
     const site = findBuildSite(world, 'sawmill')
-    if (site) {
-      world.buildQueue.push({ type: 'sawmill', ...site })
-      addEvent(world, 'Builder planning a sawmill')
-      return
-    }
+    if (site) { queueBuild(world, 'sawmill', site, 'Builder planning a sawmill'); return }
   }
 
   if (world.unlocks.has('stonemason') && !hasBuilt(world, 'stonemason') && canAfford(world, 'stonemason')) {
     const site = findBuildSite(world, 'stonemason')
-    if (site) {
-      world.buildQueue.push({ type: 'stonemason', ...site })
-      addEvent(world, 'Builder planning a stonemason')
-      return
-    }
+    if (site) { queueBuild(world, 'stonemason', site, 'Builder planning a stonemason'); return }
   }
 
   // Priority 6: Era 2 housing — longhouse (shelters 4, requires planks)
   if (world.era >= 2 && headroom <= 3 && world.unlocks.has('longhouse') && canAfford(world, 'longhouse')) {
     const site = findBuildSite(world, 'longhouse')
-    if (site) {
-      world.buildQueue.push({ type: 'longhouse', ...site })
-      addEvent(world, 'Builder planning a longhouse')
-      return
-    }
+    if (site) { queueBuild(world, 'longhouse', site, 'Builder planning a longhouse'); return }
   }
 
   // Priority 7: Market (Era 2 milestone)
   if (world.unlocks.has('market') && !hasBuilt(world, 'market') && canAfford(world, 'market')) {
     const site = findBuildSite(world, 'market')
-    if (site) {
-      world.buildQueue.push({ type: 'market', ...site })
-      addEvent(world, 'Builder planning a market')
-      return
-    }
+    if (site) { queueBuild(world, 'market', site, 'Builder planning a market'); return }
   }
 
   // Priority 8: Additional Era 1 houses if still needed and not yet era 2
   if (world.era < 2 && headroom <= 2 && world.unlocks.has('house') && wood >= BUILDING_DEFS.house.cost.wood) {
     const site = findBuildSite(world, 'house')
-    if (site) {
-      world.buildQueue.push({ type: 'house', ...site })
-      addEvent(world, 'Builder planning a house')
-      return
-    }
+    if (site) { queueBuild(world, 'house', site, 'Builder planning a house'); return }
   }
 
   // ── Era 3 buildings ────────────────────────────────────────────────────────
   if (world.unlocks.has('forge_building') && !hasBuilt(world, 'forge_building') && canAfford(world, 'forge_building')) {
     const site = findBuildSite(world, 'forge_building')
-    if (site) { world.buildQueue.push({ type: 'forge_building', ...site }); addEvent(world, 'Builder planning a forge'); return }
+    if (site) { queueBuild(world, 'forge_building', site, 'Builder planning a forge'); return }
   }
 
   if (world.era >= 3 && headroom <= 3 && world.unlocks.has('great_hall') && canAfford(world, 'great_hall')) {
     const site = findBuildSite(world, 'great_hall')
-    if (site) { world.buildQueue.push({ type: 'great_hall', ...site }); addEvent(world, 'Builder planning a great hall'); return }
+    if (site) { queueBuild(world, 'great_hall', site, 'Builder planning a great hall'); return }
   }
 
   if (world.unlocks.has('watchtower') && !hasBuilt(world, 'watchtower') && canAfford(world, 'watchtower')) {
     const site = findBuildSite(world, 'watchtower')
-    if (site) { world.buildQueue.push({ type: 'watchtower', ...site }); addEvent(world, 'Builder planning a watchtower'); return }
+    if (site) { queueBuild(world, 'watchtower', site, 'Builder planning a watchtower'); return }
   }
 
   // ── Era 4 buildings ────────────────────────────────────────────────────────
   if (world.unlocks.has('factory') && !hasBuilt(world, 'factory') && canAfford(world, 'factory')) {
     const site = findBuildSite(world, 'factory')
-    if (site) { world.buildQueue.push({ type: 'factory', ...site }); addEvent(world, 'Builder planning a factory'); return }
+    if (site) { queueBuild(world, 'factory', site, 'Builder planning a factory'); return }
   }
 
   if (world.era >= 4 && headroom <= 4 && world.unlocks.has('tenement') && canAfford(world, 'tenement')) {
     const site = findBuildSite(world, 'tenement')
-    if (site) { world.buildQueue.push({ type: 'tenement', ...site }); addEvent(world, 'Builder planning a tenement'); return }
+    if (site) { queueBuild(world, 'tenement', site, 'Builder planning a tenement'); return }
   }
 
   if (world.unlocks.has('power_station') && !hasBuilt(world, 'power_station') && canAfford(world, 'power_station')) {
     const site = findBuildSite(world, 'power_station')
-    if (site) { world.buildQueue.push({ type: 'power_station', ...site }); addEvent(world, 'Builder planning a power station'); return }
+    if (site) { queueBuild(world, 'power_station', site, 'Builder planning a power station'); return }
   }
 
   // ── Era 5 buildings ────────────────────────────────────────────────────────
   if (world.unlocks.has('nuclear_plant') && !hasBuilt(world, 'nuclear_plant') && canAfford(world, 'nuclear_plant')) {
     const site = findBuildSite(world, 'nuclear_plant')
-    if (site) { world.buildQueue.push({ type: 'nuclear_plant', ...site }); addEvent(world, 'Builder planning a nuclear plant'); return }
+    if (site) { queueBuild(world, 'nuclear_plant', site, 'Builder planning a nuclear plant'); return }
   }
 
   // ── Era 6 buildings ────────────────────────────────────────────────────────
   if (world.unlocks.has('decontam_center') && !hasBuilt(world, 'decontam_center') && canAfford(world, 'decontam_center')) {
     const site = findBuildSite(world, 'decontam_center')
-    if (site) { world.buildQueue.push({ type: 'decontam_center', ...site }); addEvent(world, 'Builder planning a decontamination center'); return }
+    if (site) { queueBuild(world, 'decontam_center', site, 'Builder planning a decontamination center'); return }
   }
 
   if (world.unlocks.has('solar_farm') && canAfford(world, 'solar_farm')) {
     const solarCount = world.buildings.filter(b => b.type === 'solar_farm' && b.isBuilt).length
     if (solarCount < 4) {  // build up to 4 solar farms
       const site = findBuildSite(world, 'solar_farm')
-      if (site) { world.buildQueue.push({ type: 'solar_farm', ...site }); addEvent(world, 'Builder planning a solar farm'); return }
+      if (site) { queueBuild(world, 'solar_farm', site, 'Builder planning a solar farm'); return }
     }
   }
 }

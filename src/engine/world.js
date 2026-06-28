@@ -150,6 +150,8 @@ export function makeCitizen(_job, x, y, state = 'idle') {
     homeId:      null,   // id of the house building this citizen lives in
     chopPhase:   0,      // current chop cycle (0–8) during tree felling
     chopSite:    null,   // { col, row } of the felled tree, for log collection loop
+    path:        [],     // [{col,row}] waypoints computed by A* pathfinding
+    pathIdx:     0,      // index of next waypoint to walk toward
   }
 }
 
@@ -275,6 +277,54 @@ export function createWorld(opts = {}) {
 
     // Fog of war — Set of tile keys visible to the player
     revealedTiles: new Set(),
+
+    // ── Season system ──────────────────────────────────────────────────────────
+    season:     'spring',
+    seasonTick: 0,
+    year:       1,
+
+    // ── Scout system (Stage 2) ─────────────────────────────────────────────────
+    scout:        { active: false, reportTimer: 0 },
+    scoutReports: [],
+
+    // ── Caravan (Stage 3) ──────────────────────────────────────────────────────
+    caravan: null,
+
+    // ── Culture (Stage 3) ──────────────────────────────────────────────────────
+    culture: { clothingPattern: null },
+
+    // ── Stage 4 tracking ──────────────────────────────────────────────────────
+    winterWarning:     false,
+    winterRequirement: null,
+    _equilibriumTicks: 0,
+
+    // ── Stage 5 ────────────────────────────────────────────────────────────────
+    mineDiscovery:  false,
+    _mineBuiltTick: 0,
+
+    // ── Stage 6 ────────────────────────────────────────────────────────────────
+    researchPoints: 0,
+    farmsDormant:   false,
+
+    // ── Stage 7 seasonal bonuses ───────────────────────────────────────────────
+    farmProductivityBonus: 1.0,
+    citizenSpeedBonus:     1.0,
+    citizenSpeedPenalty:   1.0,
+    _wintersCompleted:     0,
+
+    // ── Stage 8 challenge ──────────────────────────────────────────────────────
+    challengeType:       ['flood', 'harsh_winter', 'raiders'][Math.floor(seed % 3)],
+    challengeScore:      0,
+    challengeResolved:   false,
+    _challengeActive:    false,
+    _challengeStartTick: 0,
+    _foreshadowCount:    0,
+    raiders:             [],
+
+    // ── Stage 9 endgame ────────────────────────────────────────────────────────
+    endgame:            false,
+    ngPlusUnlocked:     false,
+    secretModeUnlocked: false,
   }
 
   // Reveal the initial lit zone around the heart
@@ -357,6 +407,14 @@ export function awardLegacy(world, type, message) {
   }
 
   addEvent(world, message)
+}
+
+// Short-circuit iteration — avoids [...tiles.values()].some() which copies the whole map
+export function hasTileType(world, type) {
+  for (const t of world.tiles.values()) {
+    if (t.type === type) return true
+  }
+  return false
 }
 
 export function computeBounds(tiles) {

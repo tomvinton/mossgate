@@ -44,7 +44,7 @@ export function updateEntities(world) {
     if (v.path.length === 0) {
       const dest = randomReachable(world.tiles, Math.round(v.x), Math.round(v.y))
       if (!dest) { v.wait = 40; continue }
-      v.path = findPath(world.tiles, Math.round(v.x), Math.round(v.y), dest.col, dest.row)
+      v.path = findPath(world.tiles, world.buildings, Math.round(v.x), Math.round(v.y), dest.col, dest.row)
       if (!v.path.length) { v.wait = 40; continue }
     }
 

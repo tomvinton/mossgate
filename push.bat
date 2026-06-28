@@ -10,7 +10,11 @@ echo  ============================================
 echo.
 
 git add .
-git commit -m "Zoom-to-fit camera + flat house cost"
+
+for /f "delims=" %%M in ('powershell -NoProfile -Command "$files = git diff --cached --name-only; if (-not $files) { 'Update files' } else { $names = $files | ForEach-Object { Split-Path $_ -Leaf }; $top = $names | Select-Object -First 5; $msg = 'Update ' + ($top -join ', '); if ($names.Count -gt 5) { $msg += ' +more' }; $msg }"') do set COMMITMSG=%%M
+
+echo Committing: %COMMITMSG%
+git commit -m "%COMMITMSG%"
 git push
 
 echo.

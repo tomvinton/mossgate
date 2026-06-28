@@ -213,6 +213,16 @@ function Calibration({ onClose }) {
   )
 }
 
+// ── Real-world time → night overlay opacity ────────────────────────────────────
+function getNightOpacity() {
+  const d = new Date()
+  const h = d.getHours() + d.getMinutes() / 60
+  if (h >= 8 && h < 19) return 0
+  if (h >= 19 && h < 21) return ((h - 19) / 2) * 0.5    // dusk: 0 → 0.5
+  if (h >= 6  && h < 8)  return 0.6 * (1 - (h - 6) / 2) // dawn: 0.6 → 0
+  return 0.5  // night (21–6)
+}
+
 // ── Main component ─────────────────────────────────────────────────────────────
 import { revealAround } from './engine/world.js'
 import { buildWorld } from './engine/worldCompositor.js'
@@ -220,9 +230,8 @@ import { seedToWorld } from './engine/seed.js'
 import { getBuildingIso } from './render/styleResolver.js'
 import { tick }                     from './engine/tick.js'
 import { createCamera, updateCamera, updateZoom, panCamera } from './render/camera.js'
-import { getNightProgress, makeStars }           from './engine/daynight.js'
-import { tileToScreen, drawTile, drawBox, drawVillager, drawWoodPile, drawFoodSacks, drawHeart, drawLogPiles } from './render/iso.js'
-import { BUILDING_DEFS, TICK_MS, ERA_DEFS, TILE_H, CYCLE_TICKS, DAY_TICKS, NIGHT_TICKS, DUSK_TICKS } from './engine/config.js'
+import { tileToScreen, drawTile, drawBox, drawChimney, drawVillager, drawWoodPile, drawFoodSacks, drawHeart, drawLogPiles } from './render/iso.js'
+import { BUILDING_DEFS, TICK_MS, ERA_DEFS, TILE_H } from './engine/config.js'
 import { fireRandomEvent } from './engine/events.js'
 
 export default function App() {
@@ -237,15 +246,18 @@ export default function App() {
   const eventsLogRef   = useRef(null)    // DOM ref — scrolling events log
   const flashRef       = useRef(null)    // DOM ref — nuclear meltdown flash overlay
   const dprRef         = useRef(1)
+  const glowSpriteRef     = useRef(null)
+  const vignetteRef       = useRef(null)
+  const lastEventsHTMLRef = useRef('')
   const worldRef      = useRef(null)
   const cameraRef     = useRef(null)
   const dragRef       = useRef(null)    // { id, x, y, startX, startY, t, moved }
-  const starsRef        = useRef(makeStars())
   const speedRef        = useRef(1)
   const speedAccRef     = useRef(0)
   const devKeyTimesRef  = useRef([])
   const fuelTapRef      = useRef({ count: 0, last: 0 })
   const timeLabelRef    = useRef(null)
+  const nightOpacityRef = useRef(0)
   const [speed, setSpeed]       = useState(1)
   const [devMenu, setDevMenu]   = useState(false)
   const [cal, setCal]           = useState(false)
@@ -277,6 +289,24 @@ export default function App() {
     const world    = buildWorld(initIds.layoutId, initIds.eraId, initIds.cultureId, initIds.biomeId, initSeed)
     worldRef.current  = world
     cameraRef.current = createCamera()
+
+    // Pre-render building glow sprite once — avoids creating a new gradient every frame
+    const gs = document.createElement('canvas')
+    gs.width = 76; gs.height = 58
+    const gc = gs.getContext('2d')
+    const gg = gc.createRadialGradient(38, 29, 0, 38, 29, 38)
+    gg.addColorStop(0,   'rgba(255,160,40,0.18)')
+    gg.addColorStop(0.4, 'rgba(255,100,20,0.07)')
+    gg.addColorStop(1,   'rgba(0,0,0,0)')
+    gc.fillStyle = gg
+    gc.fillRect(0, 0, 76, 58)
+    glowSpriteRef.current = gs
+
+    // Real-world time dimming — initial value + 60s refresh
+    nightOpacityRef.current = getNightOpacity()
+    const nightInterval = setInterval(() => {
+      nightOpacityRef.current = getNightOpacity()
+    }, 60000)
 
     const canvas = canvasRef.current
     const ctx    = canvas.getContext('2d')
@@ -370,6 +400,24 @@ export default function App() {
           // unbounded tile growth at low zoom (50k+ tiles degrades to near-freeze).
           const viewRadius = Math.min(70, Math.ceil(Math.max(W, H) / (64 * zoom)) + 12)
           revealAround(world, camCol, camRow, viewRadius)
+          // Cap revealedTiles to prevent unbounded growth — evict tiles far from camera
+          const MAX_REVEALED = 20000
+          if (world.revealedTiles.size > MAX_REVEALED) {
+            const excess = world.revealedTiles.size - MAX_REVEALED
+            const keepR  = viewRadius * 2 + 20
+            let removed  = 0
+            for (const k of world.revealedTiles) {
+              if (removed >= excess) break
+              const ci = k.indexOf(',')
+              const c = +k.slice(0, ci), r = +k.slice(ci + 1)
+              const dc = c - camCol, dr = r - camRow
+              if (dc * dc + dr * dr > keepR * keepR) {
+                world.revealedTiles.delete(k)
+                removed++
+              }
+            }
+            if (removed > 0) { sortedKeysRef.current = null; world.bgDirty = true }
+          }
           lr.x = camCol; lr.y = camRow; lr.zoom = zoom
         }
       }
@@ -436,7 +484,10 @@ export default function App() {
           const b = builtAt.get(k)
           if (b) {
             const def = BUILDING_DEFS[b.type]?.iso
-            if (def) drawBox(bgCtx, sx, sy, getBuildingIso(b.type) ?? def, 100)
+            if (def) {
+              drawBox(bgCtx, sx, sy, getBuildingIso(b.type) ?? def, 100)
+              if (b.hasChimney) drawChimney(bgCtx, sx, sy)
+            }
           }
         }
 
@@ -488,6 +539,27 @@ export default function App() {
         drawVillager(ctx, sx, sy, v)
       }
 
+      // Caravan
+      if (world.caravan) {
+        const cv = world.caravan
+        const { sx, sy } = tileToScreen(cv.x, cv.y, camera.x, camera.y, W, H)
+        drawVillager(ctx, sx, sy, {
+          bounce: cv.bounce, task: null, role: 'worker',
+          carrying: cv.state === 'arriving' ? { resource: 'wood', amount: 1 } : null,
+          state: 'arriving', chopPhase: 0,
+        })
+      }
+
+      // Raiders
+      for (const rd of (world.raiders || [])) {
+        const { sx, sy } = tileToScreen(rd.x, rd.y, camera.x, camera.y, W, H)
+        drawVillager(ctx, sx, sy, {
+          bounce: rd.bounce, task: 'guard', role: 'guard',
+          carrying: null,
+          state: rd.arrived ? 'guard_rest' : 'guard_patrol', chopPhase: 0,
+        })
+      }
+
       // Reset to no-zoom for full-screen overlays
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
 
@@ -522,13 +594,7 @@ export default function App() {
       }
       if (eraLabelRef.current) eraLabelRef.current.textContent = ERA_DEFS[world.heart.era].name
       if (timeLabelRef.current) {
-        const cp  = ((world.tick % CYCLE_TICKS) + CYCLE_TICKS) % CYCLE_TICKS
-        const day = (world.day || 0) + 1
-        const phase = cp < DAY_TICKS - DUSK_TICKS ? 'Day'
-                    : cp < DAY_TICKS              ? 'Dusk'
-                    : cp < DAY_TICKS + NIGHT_TICKS - DUSK_TICKS ? 'Night'
-                    : 'Dawn'
-        timeLabelRef.current.textContent = `Day ${day} · ${phase}`
+        timeLabelRef.current.textContent = `Day ${(world.day || 0) + 1} · ${world.season || 'spring'} · Year ${world.year || 1}`
       }
       if (resourcesRef.current) {
         const r    = world.resources
@@ -539,15 +605,21 @@ export default function App() {
         if (era >= 3)  lines.push(`🪨 ${f(r.coal)} coal  🔩 ${f(r.iron_ore)} ore  ⚙️ ${f(r.iron)} iron`)
         if (era >= 4)  lines.push(`🔧 ${f(r.steel)} steel`)
         if (era >= 5)  lines.push(`☢️ ${f(r.uranium)} uranium`)
+        if (world.stage >= 6 && world.researchPoints !== undefined)
+          lines.push(`🔬 ${Math.floor(world.researchPoints)}/100 research`)
         resourcesRef.current.textContent = lines.join('\n')
         resourcesRef.current.style.whiteSpace = 'pre'
       }
-      // Events log — show last 5 events, newest on top
-      if (eventsLogRef.current && world.events.length > 0) {
-        eventsLogRef.current.innerHTML = world.events.slice(0, 5).map((e, i) => {
+      // Events log — show last 5 events, newest on top (innerHTML guard avoids per-frame DOM churn)
+      if (eventsLogRef.current) {
+        const newHTML = world.events.slice(0, 5).map((e, i) => {
           const alpha = 1 - i * 0.18
           return `<div style="color:rgba(210,190,155,${alpha});font-size:11px;line-height:1.55;text-shadow:0 1px 3px rgba(0,0,0,0.9)">${e.msg}</div>`
         }).join('')
+        if (newHTML !== lastEventsHTMLRef.current) {
+          eventsLogRef.current.innerHTML = newHTML
+          lastEventsHTMLRef.current = newHTML
+        }
       }
 
       if (crisisRef.current) {
@@ -564,84 +636,58 @@ export default function App() {
         }
       }
 
-      // ── Day / night ────────────────────────────────────────────────────────────
-      const night = getNightProgress(world.tick)
-      if (night > 0) {
-        // Warm horizon glow — only during dusk and dawn transitions, not full night
-        // night rises during dusk (0→1) and falls during dawn (1→0);
-        // we want glow to peak at the middle of each transition.
-        // Derive that from the raw tick position within the cycle.
-        const warmPeak = night > 0 && night < 1 ? Math.sin(night * Math.PI) : 0
-        if (warmPeak > 0) {
-          const wg = ctx.createLinearGradient(0, H * 0.35, 0, H)
-          wg.addColorStop(0, `rgba(220, 90, 30, 0)`)
-          wg.addColorStop(1, `rgba(220, 60, 10, ${warmPeak * 0.28})`)
-          ctx.fillStyle = wg
-          ctx.fillRect(0, 0, W, H)
+      // ── Ambient building glows — always on ────────────────────────────────────
+      {
+        ctx.save()
+        ctx.setTransform(zoomTx, 0, 0, zoomTx, zoomEx, zoomEy)
+        ctx.globalCompositeOperation = 'screen'
+        const lHW = W / (2 * zoom) + 100, lHH = H / (2 * zoom) + 100
+        for (const b of world.buildings) {
+          if (!b.isBuilt) continue
+          const { sx, sy } = tileToScreen(b.col, b.row, camera.x, camera.y, W, H)
+          if (sx < W/2 - lHW || sx > W/2 + lHW || sy < H/2 - lHH || sy > H/2 + lHH) continue
+          if (glowSpriteRef.current) ctx.drawImage(glowSpriteRef.current, sx - 38, sy - 20)
         }
-
-        // Dark blue night overlay
-        ctx.fillStyle = `rgba(8, 12, 45, ${night * 0.70})`
-        ctx.fillRect(0, 0, W, H)
-
-        // Stars — drawn after overlay so they shine through
-        if (night > 0.15) {
-          const starAlpha = Math.min(1, (night - 0.15) / 0.25)
-          const now = performance.now()
-          ctx.save()
-          for (const s of starsRef.current) {
-            const twinkle = 0.5 + 0.5 * Math.sin(now * 0.0008 + s.twinkle * 6)
-            const a = starAlpha * (0.4 + 0.6 * twinkle)
-            ctx.beginPath()
-            ctx.arc(s.x * W, s.y * H, s.r, 0, Math.PI * 2)
-            ctx.fillStyle = `rgba(220, 230, 255, ${a})`
-            ctx.fill()
-          }
-          ctx.restore()
+        // Heart glow — scales with fuel level
+        {
+          const { sx: hgx, sy: hgy } = tileToScreen(0, 0, camera.x, camera.y, W, H)
+          const [er, eg, eb] = ERA_DEFS[world.heart.era].lightColor
+          const heartR = 55 + 35 * fuelFrac
+          const hg = ctx.createRadialGradient(hgx, hgy, 0, hgx, hgy, heartR)
+          hg.addColorStop(0,    `rgba(${er},${eg},${eb},${0.35 * fuelFrac})`)
+          hg.addColorStop(0.45, `rgba(${er},${eg},${eb},${0.12 * fuelFrac})`)
+          hg.addColorStop(1,    'rgba(0,0,0,0)')
+          ctx.fillStyle = hg
+          ctx.fillRect(hgx - heartR, hgy - heartR, heartR * 2, heartR * 2)
         }
-
-        // Lantern glows — world-space positions, need zoom transform
-        if (night > 0.25) {
-          const lanternAlpha = Math.min(1, (night - 0.25) / 0.3)
-          ctx.save()
-          ctx.setTransform(zoomTx, 0, 0, zoomTx, zoomEx, zoomEy)
-          ctx.globalCompositeOperation = 'screen'
-          const lHW = W / (2 * zoom) + 100, lHH = H / (2 * zoom) + 100
-          for (const b of world.buildings) {
-            if (!b.isBuilt) continue
-            const { sx, sy } = tileToScreen(b.col, b.row, camera.x, camera.y, W, H)
-            if (sx < W/2 - lHW || sx > W/2 + lHW || sy < H/2 - lHH || sy > H/2 + lHH) continue
-            const glow = ctx.createRadialGradient(sx, sy, 0, sx, sy, 38)
-            glow.addColorStop(0, `rgba(255, 160, 40, ${0.30 * lanternAlpha})`)
-            glow.addColorStop(0.4, `rgba(255, 100, 20, ${0.12 * lanternAlpha})`)
-            glow.addColorStop(1, 'rgba(255, 80, 10, 0)')
-            ctx.fillStyle = glow
-            ctx.fillRect(sx - 38, sy - 20, 76, 58)
-          }
-
-          // Heart glow — larger, warmer than building lanterns; scales with fuel
-          {
-            const { sx: hgx, sy: hgy } = tileToScreen(0, 0, camera.x, camera.y, W, H)
-            const [er, eg, eb] = ERA_DEFS[world.heart.era].lightColor
-            const heartR = (55 + 35 * fuelFrac) * lanternAlpha
-            const hg = ctx.createRadialGradient(hgx, hgy, 0, hgx, hgy, heartR)
-            hg.addColorStop(0,   `rgba(${er},${eg},${eb},${0.65 * lanternAlpha * fuelFrac})`)
-            hg.addColorStop(0.45, `rgba(${er},${eg},${eb},${0.25 * lanternAlpha * fuelFrac})`)
-            hg.addColorStop(1,   'rgba(0,0,0,0)')
-            ctx.fillStyle = hg
-            ctx.fillRect(hgx - heartR, hgy - heartR, heartR * 2, heartR * 2)
-          }
-          ctx.restore()
-        }
+        ctx.restore()
       }
 
-      // Vignette — full-screen, no zoom
+      // Vignette — full-screen, no zoom (cached; recreated only on resize)
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
-      const vg = ctx.createRadialGradient(W/2, H/2, H*0.2, W/2, H/2, H*0.85)
-      vg.addColorStop(0, 'rgba(0,0,0,0)')
-      vg.addColorStop(1, 'rgba(0,0,0,0.55)')
-      ctx.fillStyle = vg
-      ctx.fillRect(0, 0, W, H)
+      {
+        const vc = vignetteRef.current
+        const rW = Math.round(W), rH = Math.round(H)
+        if (!vc || vc.width !== rW || vc.height !== rH) {
+          const nc = document.createElement('canvas')
+          nc.width = rW; nc.height = rH
+          const vx = nc.getContext('2d')
+          const vg = vx.createRadialGradient(W/2, H/2, H*0.2, W/2, H/2, H*0.85)
+          vg.addColorStop(0, 'rgba(0,0,0,0)')
+          vg.addColorStop(1, 'rgba(0,0,0,0.55)')
+          vx.fillStyle = vg
+          vx.fillRect(0, 0, rW, rH)
+          vignetteRef.current = nc
+        }
+        ctx.drawImage(vignetteRef.current, 0, 0)
+      }
+
+      // Real-world time tint — dark blue-black at night, nothing during the day
+      const nightOp = nightOpacityRef.current
+      if (nightOp > 0) {
+        ctx.fillStyle = `rgba(0,20,40,${nightOp})`
+        ctx.fillRect(0, 0, W, H)
+      }
 
       raf = requestAnimationFrame(draw)
     }
@@ -749,6 +795,7 @@ export default function App() {
     return () => {
       cancelAnimationFrame(raf)
       clearInterval(simInterval)
+      clearInterval(nightInterval)
       ro.disconnect()
       canvas.removeEventListener('pointerdown',   onPointerDown)
       canvas.removeEventListener('pointermove',   onPointerMove)
@@ -784,7 +831,7 @@ export default function App() {
           Tribal
         </div>
         <div ref={timeLabelRef} style={{ color: '#886644', fontSize: 10, marginBottom: 5, marginTop: 1 }}>
-          Day 1 · Day
+          Day 1
         </div>
         {/* Fuel bar — tap 5× to open dev menu */}
         <div onClick={handleFuelTap} style={{ cursor: 'default', userSelect: 'none' }}>
