@@ -6,6 +6,9 @@ import react from '@vitejs/plugin-react'
 // port (which previously left the preview pointed at an empty page).
 export default defineConfig({
   plugins: [react()],
+  define: {
+    __BUILD_TIME__: JSON.stringify(new Date().toISOString()),
+  },
   server: {
     port: 5191,
     strictPort: true,

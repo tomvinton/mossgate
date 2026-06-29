@@ -14,7 +14,10 @@ import { saveWorld, loadSave, restoreWorld, clearSave } from './engine/persist.j
 import { dist } from './engine/world.js'
 
 const SPEEDS = [1, 3, 10, 30, 100]
-const VERSION = '0.2.0'
+const VERSION = '0.2.1'
+const BUILD_TIME = new Date(__BUILD_TIME__).toLocaleString('en-GB', {
+  day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit', hour12: false,
+})
 const TW2 = TILE_W / 2
 const TH2 = TILE_H / 2
 
@@ -390,7 +393,8 @@ export default function App() {
         const sortRebuildAge = ((now2 - sortTimeRef.current) / 1000).toFixed(1)
 
         debugRef.current.textContent = [
-          `MossGate v${VERSION}   ${clockLabel(world)}   day ${dayN}   speed ${speedRef.current}×`,
+          `MossGate v${VERSION} (${BUILD_TIME})`,
+          `${clockLabel(world)}   day ${dayN}   speed ${speedRef.current}×`,
           ``,
           `── Population ───────────────────────`,
           `citizens ${world.citizens.length}   households ${world.households.length}   migrants ${world.migrants.length}`,
