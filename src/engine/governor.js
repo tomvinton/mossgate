@@ -15,7 +15,7 @@
 // leaving the world frozen. It slowly extends paths, clears ground, and scouts ahead —
 // keeping the settlement visibly alive even during a long population plateau.
 
-import { PRESSURE, PARCEL_DEFS, GOVERNOR_DECISION_TICKS, VILLAGE_ROAD_UPGRADE_BATCH } from './config.js'
+import { PRESSURE, PARCEL_DEFS, GOVERNOR_DECISION_TICKS, VILLAGE_ROAD_UPGRADE_BATCH, CLAIM_MAX_RADIUS } from './config.js'
 import { claimParcel, findParcelSite, developingParcels } from './parcels.js'
 import { addEvent, setTile, tileType, dist } from './world.js'
 import { revealAround, unkey } from './terrain.js'
@@ -288,14 +288,23 @@ function choosePeacefulProject(world) {
 }
 
 // Extend the outermost path tile 3–4 tiles further into the forest.
-// Visually: a short new road segment grows out from the settlement edge.
+// Capped so paths don't run off infinitely in one direction — they stop once
+// they reach a modest buffer past the farthest claimed parcel.
 function tryExtendExploratoryPath(world) {
+  // Never extend beyond the farthest parcel + a small scout buffer.
+  let farthestParcel = 8
+  for (const p of world.parcels) {
+    const d = Math.hypot(p.col, p.row)
+    if (d > farthestParcel) farthestParcel = d
+  }
+  const maxDist = Math.min(CLAIM_MAX_RADIUS + 4, farthestParcel + 8)
+
   let best = null, bestD = 0
   for (const [k, t] of world.tiles) {
-    if (t.type !== 'path') continue
+    if (t.type !== 'path' && t.type !== 'road') continue
     const [c, r] = unkey(k)
     const d = Math.hypot(c, r)
-    if (d > bestD) { bestD = d; best = { col: c, row: r } }
+    if (d > bestD && d < maxDist) { bestD = d; best = { col: c, row: r } }
   }
   if (!best || bestD < 3) return false
 
