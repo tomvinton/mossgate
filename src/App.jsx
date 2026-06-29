@@ -1,807 +1,499 @@
 import { useEffect, useRef, useState } from 'react'
 
-// ── Calibration overlay ────────────────────────────────────────────────────────
-const FPS_TARGETS = [
-  { fps: 60,  color: '#00ff88', label: '60 fps' },
-  { fps: 30,  color: '#ffdd00', label: '30 fps' },
-  { fps: 24,  color: '#ff8800', label: '24 fps' },
-  { fps: 15,  color: '#ff3333', label: '15 fps' },
-  { fps: 10,  color: '#cc00ff', label: '10 fps' },
-]
+import { foundWorld } from './engine/founding.js'
+import { tick } from './engine/sim.js'
+import { TICK_MS, TILE_H, TILE_W, CYCLE_TICKS, MIGRATION_CONFIDENCE, PRESSURE } from './engine/config.js'
+import { foodDays } from './engine/economy.js'
+import { darkness, clockLabel, season } from './engine/time.js'
+import { createCamera, updateCamera, updateZoom, panCamera } from './render/camera.js'
+import {
+  tileToScreen, drawTile, drawBuilding, drawYard, drawHearth, drawStockpile,
+  drawCitizen, drawMigrant, drawScaffold,
+} from './render/iso.js'
+import { saveWorld, loadSave, restoreWorld, clearSave } from './engine/persist.js'
+import { dist } from './engine/world.js'
 
-function Calibration({ onClose }) {
-  const canvasRef = useRef(null)
-  const pageRef   = useRef('edge')   // 'edge' | 'fps'
-  const [page, setPage] = useState('edge')
+const SPEEDS = [1, 3, 10, 30, 100]
+const TW2 = TILE_W / 2
+const TH2 = TILE_H / 2
 
-  useEffect(() => {
-    const canvas = canvasRef.current
-    const ctx    = canvas.getContext('2d')
-    let   raf
+// ── Isometric hit-testing helpers ─────────────────────────────────────────────
+// Convert a CSS-pixel click to the pre-zoom screen coords used by tileToScreen.
+function clientToPreZoom(clientX, clientY, zoom, W, H) {
+  return {
+    sx: (clientX - W / 2 * (1 - zoom)) / zoom,
+    sy: (clientY - H / 2 * (1 - zoom)) / zoom,
+  }
+}
 
-    const dpr = window.devicePixelRatio || 1
-    canvas.width  = window.innerWidth  * dpr
-    canvas.height = window.innerHeight * dpr
-    ctx.scale(dpr, dpr)
+function hitTestClick(world, camera, clientX, clientY, W, H) {
+  const zoom = camera.zoom
+  const { sx: cx, sy: cy } = clientToPreZoom(clientX, clientY, zoom, W, H)
 
-    const W = window.innerWidth
-    const H = window.innerHeight
+  // Citizens — generous radius.
+  let bestC = null, bestCD = 14
+  for (const c of world.citizens) {
+    const { sx, sy } = tileToScreen(c.x, c.y, camera.x, camera.y, W, H)
+    const d = Math.hypot(cx - sx, cy - (sy + TH2 - 9))
+    if (d < bestCD) { bestCD = d; bestC = c }
+  }
+  if (bestC) return { type: 'citizen', entity: bestC }
 
-    // FPS tracking
-    const frameTimes = []
+  // Parcels — check if click is within the parcel's footprint radius.
+  let bestP = null, bestPD = Infinity
+  for (const p of world.parcels) {
+    const { sx, sy } = tileToScreen(p.col, p.row, camera.x, camera.y, W, H)
+    const reach = (p.half + 0.5) * TW2          // screen-space approximate radius
+    const d = Math.hypot(cx - sx, cy - (sy + TH2))
+    if (d < reach && d < bestPD) { bestPD = d; bestP = p }
+  }
+  if (bestP) return { type: 'parcel', entity: bestP }
 
-    // Balls for fps test — each moves at its own update rate
-    const balls = FPS_TARGETS.map((t, i) => ({
-      ...t,
-      x:      W * 0.1,
-      y:      H * 0.25 + i * (H * 0.12),
-      speed:  W * 0.55 / 1000,  // cross track width in 1 second
-      dir:    1,
-      acc:    0,
-      interval: 1000 / t.fps,
-    }))
-    const trackX  = W * 0.2
-    const trackW  = W * 0.6
-    const ballR   = H * 0.025
+  return null
+}
 
-    function drawEdge(now) {
-      ctx.fillStyle = '#0a0a0a'
-      ctx.fillRect(0, 0, W, H)
+// ── Inspector panel ────────────────────────────────────────────────────────────
+function Inspector({ hit, world, onClose }) {
+  if (!hit) return null
+  const { type, entity: e } = hit
 
-      // ── Full-edge border — drawn at pixel 0 so 1px hangs outside, 1px inside ──
-      // Using lineWidth=4 centered on edge = 2px visible inside
-      ctx.strokeStyle = '#ffffff'
-      ctx.lineWidth   = 4
-      ctx.strokeRect(2, 2, W - 4, H - 4)
+  const day = n => `Day ${n}`
+  const rows = []
 
-      // Corner markers — filled squares at exact corners
-      const csz = 28
-      const corners = [[0,0],[W-csz,0],[0,H-csz],[W-csz,H-csz]]
-      for (const [cx, cy] of corners) {
-        ctx.fillStyle = '#ffff00'
-        ctx.fillRect(cx, cy, csz, csz)
-      }
-
-      // Corner labels
-      ctx.font         = 'bold 13px monospace'
-      ctx.fillStyle    = '#ffff00'
-      ctx.textBaseline = 'top'
-      ctx.textAlign    = 'left';  ctx.fillText('TOP LEFT',     csz + 6, 8)
-      ctx.textAlign    = 'right'; ctx.fillText('TOP RIGHT',    W - csz - 6, 8)
-      ctx.textBaseline = 'bottom'
-      ctx.textAlign    = 'left';  ctx.fillText('BOTTOM LEFT',  csz + 6, H - 8)
-      ctx.textAlign    = 'right'; ctx.fillText('BOTTOM RIGHT', W - csz - 6, H - 8)
-
-      // Center crosshair
-      const cx = W / 2, cy = H / 2
-      ctx.strokeStyle = '#00ff88'
-      ctx.lineWidth   = 1.5
-      ctx.beginPath(); ctx.moveTo(cx, cy - 40); ctx.lineTo(cx, cy + 40); ctx.stroke()
-      ctx.beginPath(); ctx.moveTo(cx - 40, cy); ctx.lineTo(cx + 40, cy); ctx.stroke()
-      ctx.beginPath(); ctx.arc(cx, cy, 36, 0, Math.PI * 2); ctx.stroke()
-
-      // Color bars — horizontal strip in center
-      const colors = ['#f00','#0f0','#00f','#ff0','#0ff','#f0f','#fff','#000']
-      const bw = W / colors.length, bh = H * 0.1, by = cy - bh - 60
-      colors.forEach((c, i) => {
-        ctx.fillStyle = c; ctx.fillRect(i * bw, by, bw, bh)
-      })
-      ctx.strokeStyle = '#333'; ctx.lineWidth = 1
-      colors.forEach((_, i) => ctx.strokeRect(i * bw, by, bw, bh))
-
-      // Grayscale ramp
-      const steps = 12, sw = W / steps, sh = H * 0.07, sy = cy + 60
-      for (let i = 0; i < steps; i++) {
-        const v = Math.round((i / (steps - 1)) * 255)
-        ctx.fillStyle = `rgb(${v},${v},${v})`
-        ctx.fillRect(i * sw, sy, sw, sh)
-      }
-
-      // Info block
-      ctx.fillStyle    = 'rgba(0,0,0,0.7)'
-      ctx.fillRect(cx - 160, cy - 28, 320, 58)
-      ctx.font         = '13px monospace'
-      ctx.fillStyle    = '#aaa'
-      ctx.textAlign    = 'center'
-      ctx.textBaseline = 'middle'
-      ctx.fillText(`${W} × ${H}  ·  DPR ${dpr}x  ·  ${W*dpr} × ${H*dpr} physical`, cx, cy - 10)
-      ctx.fillStyle = '#555'
-      ctx.fillText('yellow squares should sit in every corner', cx, cy + 10)
+  if (type === 'citizen') {
+    const hh = world.households.find(h => h.id === e.householdId)
+    const task = e.task ? e.task.charAt(0).toUpperCase() + e.task.slice(1) : '—'
+    const stateFmt = e.state.replace(/_/g, ' ')
+    rows.push(['Name',      e.name   || '—'])
+    rows.push(['Household', hh?.name || '—'])
+    rows.push(['Arrived',   day(e.arrivalDay ?? 0)])
+    rows.push(['Task',      task])
+    rows.push(['State',     stateFmt])
+    if (e.carrying) rows.push(['Carrying', `${e.carrying.amt} ${e.carrying.res}`])
+  } else if (type === 'parcel') {
+    const workerNames = world.citizens
+      .filter(c => c.workParcelId === e.id)
+      .map(c => c.name || '?')
+    rows.push(['Name',    e.name || PARCEL_LABEL[e.type] || e.type])
+    rows.push(['Type',    PARCEL_LABEL[e.type] || e.type])
+    rows.push(['State',   e.state])
+    if (e.jobs > 0) rows.push(['Workers', workerNames.join(', ') || 'none'])
+    if (e.state === 'developing') {
+      rows.push(['Progress', `${Math.round((e.progress / e.develop) * 100)}%`])
     }
+  }
 
-    function drawFps(now) {
-      // Track real frame rate
-      frameTimes.push(now)
-      if (frameTimes.length > 120) frameTimes.shift()
-      let measuredFps = 0
-      if (frameTimes.length > 10) {
-        const span = frameTimes[frameTimes.length - 1] - frameTimes[0]
-        measuredFps = ((frameTimes.length - 1) / span) * 1000
-      }
-
-      ctx.fillStyle = '#0a0a0a'
-      ctx.fillRect(0, 0, W, H)
-
-      // Big FPS readout
-      ctx.textAlign    = 'center'
-      ctx.textBaseline = 'top'
-      ctx.font         = `bold ${Math.floor(H * 0.14)}px monospace`
-      ctx.fillStyle    = measuredFps > 55 ? '#00ff88' : measuredFps > 28 ? '#ffdd00' : '#ff3333'
-      ctx.fillText(`${measuredFps.toFixed(1)}`, W / 2, H * 0.04)
-      ctx.font      = `${Math.floor(H * 0.03)}px monospace`
-      ctx.fillStyle = '#555'
-      ctx.fillText('measured fps', W / 2, H * 0.04 + H * 0.155)
-
-      // Moving balls, each at its own rate
-      for (const b of balls) {
-        b.acc += now * 0  // just using now directly
-        // Update position using real time
-        const newX = trackX + ((now * b.speed * b.dir) % trackW + trackW) % trackW
-
-        // Draw track
-        ctx.strokeStyle = '#222'
-        ctx.lineWidth   = 2
-        ctx.beginPath()
-        ctx.moveTo(trackX, b.y)
-        ctx.lineTo(trackX + trackW, b.y)
-        ctx.stroke()
-
-        // Label
-        ctx.font         = `bold ${Math.floor(ballR * 1.1)}px monospace`
-        ctx.fillStyle    = b.color
-        ctx.textAlign    = 'right'
-        ctx.textBaseline = 'middle'
-        ctx.fillText(b.label, trackX - 12, b.y)
-
-        // Ball — position based on time, but stepped to simulate the target fps
-        const frameN  = Math.floor(now / b.interval)
-        const steppedX = trackX + (frameN * b.speed * b.interval) % trackW
-
-        ctx.beginPath()
-        ctx.arc(steppedX, b.y, ballR, 0, Math.PI * 2)
-        ctx.fillStyle   = b.color
-        ctx.shadowColor = b.color
-        ctx.shadowBlur  = 12
-        ctx.fill()
-        ctx.shadowBlur = 0
-      }
-
-      // Legend
-      ctx.font         = `${Math.floor(H * 0.022)}px monospace`
-      ctx.fillStyle    = '#444'
-      ctx.textAlign    = 'center'
-      ctx.textBaseline = 'bottom'
-      ctx.fillText('the smoothest-looking ball matches your display refresh rate', W / 2, H - 16)
-    }
-
-    function loop(now) {
-      if (pageRef.current === 'edge') drawEdge(now)
-      else drawFps(now)
-      raf = requestAnimationFrame(loop)
-    }
-    raf = requestAnimationFrame(loop)
-    return () => cancelAnimationFrame(raf)
-  }, [])
-
-  const btnStyle = (active) => ({
-    padding: '8px 22px', borderRadius: 4, cursor: 'pointer',
-    fontFamily: 'monospace', fontSize: 13,
-    background: active ? '#1a3a1a' : '#1a1a1a',
-    color: active ? '#00ff88' : '#666',
-    border: `1px solid ${active ? '#00ff88' : '#333'}`,
-  })
+  const history = e.history || []
 
   return (
-    <div style={{ position: 'fixed', inset: 0, zIndex: 100 }}>
-      <canvas ref={canvasRef} style={{ display: 'block', width: '100%', height: '100%' }} />
-      {/* Controls overlay */}
-      <div style={{
-        position: 'absolute', bottom: 20, left: '50%', transform: 'translateX(-50%)',
-        display: 'flex', gap: 10, alignItems: 'center',
-      }}>
-        <button style={btnStyle(page === 'edge')} onClick={() => { setPage('edge'); pageRef.current = 'edge' }}>
-          Edge test
-        </button>
-        <button style={btnStyle(page === 'fps')} onClick={() => { setPage('fps'); pageRef.current = 'fps' }}>
-          Frame rate
-        </button>
-        <button style={{ ...btnStyle(false), color: '#888' }} onClick={onClose}>
-          Close
-        </button>
+    <div style={{
+      position: 'fixed', bottom: 18, right: 18, zIndex: 20,
+      background: 'rgba(6,12,6,0.82)', border: '1px solid rgba(160,220,120,0.22)',
+      borderRadius: 7, padding: '10px 14px', font: '11px/1.6 monospace', color: '#bfe0a0',
+      maxWidth: 260, pointerEvents: 'auto',
+    }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6 }}>
+        <span style={{ color: '#e0f0b0', fontWeight: 'bold', textTransform: 'capitalize' }}>
+          {type === 'citizen' ? '👤' : '🏡'} {type}
+        </span>
+        <button onClick={onClose} style={{
+          background: 'none', border: 'none', color: '#789', cursor: 'pointer',
+          font: '12px monospace', lineHeight: 1, padding: '0 2px',
+        }}>✕</button>
       </div>
+      <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+        <tbody>
+          {rows.map(([label, val]) => (
+            <tr key={label}>
+              <td style={{ color: '#789', paddingRight: 8, whiteSpace: 'nowrap' }}>{label}</td>
+              <td style={{ color: '#cce0a8' }}>{val}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      {history.length > 0 && (
+        <div style={{ marginTop: 8, borderTop: '1px solid rgba(160,220,120,0.12)', paddingTop: 6 }}>
+          <div style={{ color: '#789', marginBottom: 3 }}>History</div>
+          {history.slice(-6).map((h, i) => (
+            <div key={i} style={{ color: '#9ab880', fontSize: 10, lineHeight: 1.4 }}>
+              <span style={{ color: '#567', marginRight: 4 }}>Day {h.day}</span>{h.msg}
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   )
 }
 
-// ── Real-world time → night overlay opacity ────────────────────────────────────
-function getNightOpacity() {
-  const d = new Date()
-  const h = d.getHours() + d.getMinutes() / 60
-  if (h >= 8 && h < 19) return 0
-  if (h >= 19 && h < 21) return ((h - 19) / 2) * 0.5    // dusk: 0 → 0.5
-  if (h >= 6  && h < 8)  return 0.6 * (1 - (h - 6) / 2) // dawn: 0.6 → 0
-  return 0.5  // night (21–6)
+const PARCEL_LABEL = {
+  hearth: 'Hearth', dwelling: 'Homestead', field: 'Field', forage: 'Foraging Ground',
+  woodlot: 'Woodlot', storage: 'Stores', common: 'Village Common',
 }
 
-// ── Main component ─────────────────────────────────────────────────────────────
-import { revealAround } from './engine/world.js'
-import { buildWorld } from './engine/worldCompositor.js'
-import { seedToWorld } from './engine/seed.js'
-import { getBuildingIso } from './render/styleResolver.js'
-import { tick }                     from './engine/tick.js'
-import { createCamera, updateCamera, updateZoom, panCamera } from './render/camera.js'
-import { tileToScreen, drawTile, drawBox, drawChimney, drawVillager, drawWoodPile, drawFoodSacks, drawHeart, drawLogPiles } from './render/iso.js'
-import { BUILDING_DEFS, TICK_MS, ERA_DEFS, TILE_H } from './engine/config.js'
-import { fireRandomEvent } from './engine/events.js'
-
+// ── App ────────────────────────────────────────────────────────────────────────
 export default function App() {
-  const canvasRef     = useRef(null)
-  const bgCanvasRef   = useRef(null)    // offscreen canvas — tiles + built buildings
-  const sortedKeysRef  = useRef(null)    // revealed tiles sorted for painter's algorithm
-  const lastRevealRef  = useRef({ x: null, y: null, zoom: null })
-  const fuelBarRef     = useRef(null)    // DOM ref — updated each frame, no re-render
-  const eraLabelRef    = useRef(null)
-  const resourcesRef   = useRef(null)    // DOM ref — resource counts
-  const crisisRef      = useRef(null)    // DOM ref — fuel crisis warning
-  const eventsLogRef   = useRef(null)    // DOM ref — scrolling events log
-  const flashRef       = useRef(null)    // DOM ref — nuclear meltdown flash overlay
-  const dprRef         = useRef(1)
-  const glowSpriteRef     = useRef(null)
-  const vignetteRef       = useRef(null)
-  const lastEventsHTMLRef = useRef('')
-  const worldRef      = useRef(null)
-  const cameraRef     = useRef(null)
-  const dragRef       = useRef(null)    // { id, x, y, startX, startY, t, moved }
+  const canvasRef       = useRef(null)
+  const worldRef        = useRef(null)
+  const cameraRef       = useRef(null)
+  const bgRef           = useRef(null)
+  const sortedKeysRef   = useRef(null)
+  const sortVersionRef  = useRef(-1)       // last revealedVersion we sorted at
+  const sortTimeRef     = useRef(0)        // last real-time sort happened
+  const dprRef          = useRef(1)
   const speedRef        = useRef(1)
+  const dragRef         = useRef(null)
   const speedAccRef     = useRef(0)
-  const devKeyTimesRef  = useRef([])
-  const fuelTapRef      = useRef({ count: 0, last: 0 })
-  const timeLabelRef    = useRef(null)
-  const nightOpacityRef = useRef(0)
-  const [speed, setSpeed]       = useState(1)
-  const [devMenu, setDevMenu]   = useState(false)
-  const [cal, setCal]           = useState(false)
-  const [selected, setSelected] = useState(null)  // { type, data } snapshot
+  const vignetteRef     = useRef(null)
+  const saveStatusRef   = useRef('ok')     // 'ok' | 'saving' | 'failed'
 
-  // ── Dev menu actions (refs are stable, safe to call from JSX handlers) ────────
-  const handleFuelTap = () => {
-    const now = Date.now()
-    const ft  = fuelTapRef.current
-    if (now - ft.last > 1500) ft.count = 0   // reset if too slow
-    ft.last = now
-    ft.count++
-    if (ft.count >= 5) { ft.count = 0; setDevMenu(v => !v) }
-  }
-
-  const jumpToEra = (era) => {
-    const w = worldRef.current; if (!w) return
-    const def = ERA_DEFS[era]
-    w.era = era; w.heart.era = era
-    w.heart.fuelMax = def.fuelMax; w.heart.fuelTank = def.fuelMax
-    w.heart.lightRadius = def.lightRadius; w.collapseTimer = 0; w.bgDirty = true
-  }
-  const forceEvent    = () => { if (worldRef.current) fireRandomEvent(worldRef.current) }
-  const forceCollapse = () => { if (worldRef.current) worldRef.current.collapsed = true }
+  const [speed,     setSpeed]     = useState(1)
+  const [debug,     setDebug]     = useState(false)
+  const [selected,  setSelected]  = useState(null)  // { type, entity }
+  const debugRef    = useRef(null)
+  const selectedRef = useRef(null)
 
   useEffect(() => {
-    const initSeed = Math.random() * 99999
-    const initIds  = seedToWorld(initSeed)
-    const world    = buildWorld(initIds.layoutId, initIds.eraId, initIds.cultureId, initIds.biomeId, initSeed)
-    worldRef.current  = world
-    cameraRef.current = createCamera()
-
-    // Pre-render building glow sprite once — avoids creating a new gradient every frame
-    const gs = document.createElement('canvas')
-    gs.width = 76; gs.height = 58
-    const gc = gs.getContext('2d')
-    const gg = gc.createRadialGradient(38, 29, 0, 38, 29, 38)
-    gg.addColorStop(0,   'rgba(255,160,40,0.18)')
-    gg.addColorStop(0.4, 'rgba(255,100,20,0.07)')
-    gg.addColorStop(1,   'rgba(0,0,0,0)')
-    gc.fillStyle = gg
-    gc.fillRect(0, 0, 76, 58)
-    glowSpriteRef.current = gs
-
-    // Real-world time dimming — initial value + 60s refresh
-    nightOpacityRef.current = getNightOpacity()
-    const nightInterval = setInterval(() => {
-      nightOpacityRef.current = getNightOpacity()
-    }, 60000)
+    // ── World: load saved or start fresh ───────────────────────────────────────
+    let world
+    const saved = loadSave()
+    if (saved) {
+      try {
+        world = restoreWorld(saved)
+        console.log('[MossGate] Loaded saved world (day', Math.floor(saved.tick / CYCLE_TICKS), ')')
+      } catch (e) {
+        console.warn('[MossGate] Restore failed, starting fresh:', e)
+        world = foundWorld()
+      }
+    } else {
+      world = foundWorld()
+    }
+    worldRef.current   = world
+    cameraRef.current  = createCamera()
 
     const canvas = canvasRef.current
     const ctx    = canvas.getContext('2d')
-    let   raf
-
-    // Offscreen canvas for tiles + built buildings (redrawn only when bgDirty)
-    const bgCanvas = document.createElement('canvas')
-    bgCanvasRef.current = bgCanvas
+    const bg     = document.createElement('canvas')
+    bgRef.current = bg
+    let raf
 
     const resize = () => {
       const dpr = window.devicePixelRatio || 1
       dprRef.current = dpr
       canvas.width  = Math.round(window.innerWidth  * dpr)
       canvas.height = Math.round(window.innerHeight * dpr)
-      worldRef.current.bgDirty = true   // canvas size changed — rebuild bg
+      worldRef.current.bgDirty = true
     }
     resize()
     const ro = new ResizeObserver(resize)
     ro.observe(canvas)
 
-    // ── Simulation loop ───────────────────────────────────────────────────────
+    // ── Simulation loop ────────────────────────────────────────────────────────
     const simInterval = setInterval(() => {
       speedAccRef.current += speedRef.current
-      const reps = Math.floor(speedAccRef.current)
+      let reps = Math.floor(speedAccRef.current)
       speedAccRef.current -= reps
+      if (reps > 400) reps = 400
       for (let i = 0; i < reps; i++) tick(worldRef.current)
       updateCamera(cameraRef.current, worldRef.current)
 
-      // ── Collapse check ─────────────────────────────────────────────────────
-      const w = worldRef.current
-      if (w.collapsed || w.nuclearCollapse) {
-        const wasNuclear = w.nuclearCollapse
-        const prevReveal = w.nuclearRevealed || wasNuclear
-
-        if (wasNuclear && flashRef.current) {
-          // Nuclear flash: white flare then fade over 2 seconds
-          flashRef.current.style.transition = 'none'
-          flashRef.current.style.opacity    = '1'
-          setTimeout(() => {
-            if (flashRef.current) {
-              flashRef.current.style.transition = 'opacity 2s ease'
-              flashRef.current.style.opacity    = '0'
-            }
-          }, 200)
-        }
-
-        const newSeed = Math.random() * 99999
-        const newIds  = seedToWorld(newSeed)
-        const newWorld = buildWorld(newIds.layoutId, newIds.eraId, newIds.cultureId, newIds.biomeId, newSeed, { nuclearRevealed: prevReveal })
-        worldRef.current  = newWorld
-        sortedKeysRef.current = null
-        lastRevealRef.current = { x: null, y: null, zoom: null }
-        cameraRef.current.x = 0
-        cameraRef.current.y = 0
+      // Autosave when the sim sets the flag.
+      if (worldRef.current._autosaveDue) {
+        worldRef.current._autosaveDue = false
+        const ok = saveWorld(worldRef.current)
+        saveStatusRef.current = ok ? 'ok' : 'failed'
       }
     }, TICK_MS)
 
-    // ── Render loop ───────────────────────────────────────────────────────────
-    const FRAME_MS = 1000 / 24   // ~41.7 ms — 24 fps cap
-    let lastFrameTime = 0
+    // ── Render loop (24fps cap) ────────────────────────────────────────────────
+    const FRAME_MS = 1000 / 24
+    let lastFrame  = 0
 
     function draw(now) {
-      // 24 fps cap — skip frame if not enough time has elapsed
-      const elapsed = now - lastFrameTime
-      if (elapsed < FRAME_MS) { raf = requestAnimationFrame(draw); return }
-      lastFrameTime = now - (elapsed % FRAME_MS)
+      if (now - lastFrame < FRAME_MS) { raf = requestAnimationFrame(draw); return }
+      lastFrame = now
 
       const dpr    = dprRef.current
-      const W      = canvas.width  / dpr
+      const W      = canvas.width / dpr
       const H      = canvas.height / dpr
       const world  = worldRef.current
       const camera = cameraRef.current
 
-      // Zoom-to-fit: lerp toward the zoom that keeps all built buildings on screen
       updateZoom(camera, W, H)
       const zoom = camera.zoom
 
-      // ── Viewport-driven tile generation — ensures the world extends beyond view ──
-      // Convert camera world-coords to tile-coords (inverse of tileToScreen at center)
-      {
-        const TW2 = 32, TH2 = 16   // TILE_W/2, TILE_H/2
-        const camCol = Math.round((camera.x / TW2 + camera.y / TH2) / 2)
-        const camRow = Math.round((camera.y / TH2 - camera.x / TW2) / 2)
-        const lr     = lastRevealRef.current
-        const moved  = lr.x == null ||
-          Math.abs(camCol - lr.x) > 4 ||
-          Math.abs(camRow - lr.y) > 4 ||
-          Math.abs(zoom  - lr.zoom) > 0.08
-        if (moved) {
-          // Radius that covers the visible viewport plus a buffer, capped to prevent
-          // unbounded tile growth at low zoom (50k+ tiles degrades to near-freeze).
-          const viewRadius = Math.min(70, Math.ceil(Math.max(W, H) / (64 * zoom)) + 12)
-          revealAround(world, camCol, camRow, viewRadius)
-          // Cap revealedTiles to prevent unbounded growth — evict tiles far from camera
-          const MAX_REVEALED = 20000
-          if (world.revealedTiles.size > MAX_REVEALED) {
-            const excess = world.revealedTiles.size - MAX_REVEALED
-            const keepR  = viewRadius * 2 + 20
-            let removed  = 0
-            for (const k of world.revealedTiles) {
-              if (removed >= excess) break
-              const ci = k.indexOf(',')
-              const c = +k.slice(0, ci), r = +k.slice(ci + 1)
-              const dc = c - camCol, dr = r - camRow
-              if (dc * dc + dr * dr > keepR * keepR) {
-                world.revealedTiles.delete(k)
-                removed++
-              }
-            }
-            if (removed > 0) { sortedKeysRef.current = null; world.bgDirty = true }
-          }
-          lr.x = camCol; lr.y = camRow; lr.zoom = zoom
-        }
-      }
-
-      // ── Sorted revealed tile keys — re-sorted whenever new tiles are revealed ──
-      // Pre-parse col/row once here so the draw loop never calls split().map().
-      const revCount = world.revealedTiles.size
-      if (!sortedKeysRef.current || sortedKeysRef.current.length !== revCount) {
+      // ── Painter-order list: rebuild only when reveal changes, debounced ──────
+      // At 100+ citizens, revealedTiles grows every ~0.3s real time. Without
+      // debouncing, this O(n log n) sort would run on every render frame (24/s),
+      // causing 1–2s stutter bursts. Instead we rebuild at most ~2/second.
+      const rv  = world.revealedVersion || 0
+      const now2 = performance.now()
+      if (!sortedKeysRef.current ||
+          (rv !== sortVersionRef.current && now2 - sortTimeRef.current > 500)) {
         sortedKeysRef.current = [...world.revealedTiles].map(k => {
-          const ci = k.indexOf(',')
-          return { k, col: +k.slice(0, ci), row: +k.slice(ci + 1) }
-        }).sort((a, b) => {
-          const da = a.col + a.row, db = b.col + b.row
-          return da !== db ? da - db : a.col - b.col
-        })
+          const i = k.indexOf(',')
+          return { k, col: +k.slice(0, i), row: +k.slice(i + 1) }
+        }).sort((a, b) => (a.col + a.row) - (b.col + b.row) || a.col - b.col)
+        sortVersionRef.current = rv
+        sortTimeRef.current    = now2
       }
       const keys = sortedKeysRef.current
 
-      // ── Background canvas — tiles + BUILT buildings ────────────────────────────
-      // Invalidated when: bgDirty flag set (building/stump change) OR camera moved
-      const bg    = bgCanvasRef.current
-      const bgCtx = bg.getContext('2d')
-      const camMoved  = Math.abs(camera.x    - (bg._camX  ?? camera.x    + 1)) > 0.5 ||
-                        Math.abs(camera.y    - (bg._camY  ?? camera.y    + 1)) > 0.5 ||
-                        Math.abs(camera.zoom - (bg._zoom  ?? camera.zoom  + 1)) > 0.005
-
+      // ── Static background: terrain + built structures ──────────────────────
+      const camMoved =
+        Math.abs(camera.x - (bg._cx ?? 1e9)) > 0.4 ||
+        Math.abs(camera.y - (bg._cy ?? 1e9)) > 0.4 ||
+        Math.abs(camera.zoom - (bg._cz ?? 1e9)) > 0.004
       if (world.bgDirty || camMoved || bg.width !== canvas.width || bg.height !== canvas.height) {
-        // Match physical pixel dimensions
         if (bg.width !== canvas.width || bg.height !== canvas.height) {
-          bg.width  = canvas.width
-          bg.height = canvas.height
+          bg.width = canvas.width; bg.height = canvas.height
         }
+        const bx = bg.getContext('2d')
+        bx.setTransform(dpr, 0, 0, dpr, 0, 0)
+        bx.fillStyle = '#0c160a'
+        bx.fillRect(0, 0, W, H)
+        bx.setTransform(dpr * zoom, 0, 0, dpr * zoom, dpr * W / 2 * (1 - zoom), dpr * H / 2 * (1 - zoom))
 
-        // Background fill — full canvas, no zoom
-        bgCtx.setTransform(dpr, 0, 0, dpr, 0, 0)
-        bgCtx.fillStyle = '#1a2a12'
-        bgCtx.fillRect(0, 0, W, H)
-
-        // Zoom transform for tile drawing: scale around screen center
-        bgCtx.setTransform(
-          dpr * zoom, 0, 0, dpr * zoom,
-          dpr * W / 2 * (1 - zoom),
-          dpr * H / 2 * (1 - zoom)
-        )
-
-        const builtAt  = new Map()
+        const builtAt = new Map()
         for (const b of world.buildings) if (b.isBuilt) builtAt.set(`${b.col},${b.row}`, b)
 
-        // Zoom-correct viewport culling.
-        // tileToScreen returns unzoomed logical coords; the bgCtx applies zoom centered
-        // on (W/2, H/2). A tile at logical sx is visible when:
-        //   0 ≤ sx*zoom + W/2*(1-zoom) ≤ W  →  W/2 ± W/(2*zoom)
-        // We add a small pixel buffer so tiles at the edge aren't clipped.
-        const halfVW = W / (2 * zoom) + 96
-        const halfVH = H / (2 * zoom) + 96
-        const minSX = W / 2 - halfVW, maxSX = W / 2 + halfVW
-        const minSY = H / 2 - halfVH, maxSY = H / 2 + halfVH
-
+        const halfVW = W / (2 * zoom) + 96, halfVH = H / (2 * zoom) + 96
         for (const { k, col, row } of keys) {
-          const tile = world.tiles.get(k)
           const { sx, sy } = tileToScreen(col, row, camera.x, camera.y, W, H)
-          if (sx < minSX || sx > maxSX || sy < minSY || sy > maxSY) continue
-          drawTile(bgCtx, sx, sy, tile.type)
+          if (Math.abs(sx - W / 2) > halfVW || Math.abs(sy - H / 2) > halfVH) continue
+          drawTile(bx, sx, sy, world.tiles.get(k).type)
           const b = builtAt.get(k)
-          if (b) {
-            const def = BUILDING_DEFS[b.type]?.iso
-            if (def) {
-              drawBox(bgCtx, sx, sy, getBuildingIso(b.type) ?? def, 100)
-              if (b.hasChimney) drawChimney(bgCtx, sx, sy)
-            }
-          }
+          if (b) { if (b.type === 'hut') drawYard(bx, sx, sy); drawBuilding(bx, sx, sy, b.type) }
         }
-
-        bg._camX = camera.x
-        bg._camY = camera.y
-        bg._zoom = camera.zoom
+        bg._cx = camera.x; bg._cy = camera.y; bg._cz = camera.zoom
         world.bgDirty = false
       }
 
-      // ── Composite frame ────────────────────────────────────────────────────────
-      // bg canvas has zoom baked in — draw at 1:1
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
       ctx.drawImage(bg, 0, 0, W, H)
 
-      // Zoom transform for world-space foreground elements
-      const zoomTx = dpr * zoom
-      const zoomEx = dpr * W / 2 * (1 - zoom)
-      const zoomEy = dpr * H / 2 * (1 - zoom)
-      ctx.setTransform(zoomTx, 0, 0, zoomTx, zoomEx, zoomEy)
+      // ── Dynamic foreground ────────────────────────────────────────────────────
+      const ztx = dpr * zoom, zex = dpr * W / 2 * (1 - zoom), zey = dpr * H / 2 * (1 - zoom)
+      ctx.setTransform(ztx, 0, 0, ztx, zex, zey)
 
-      // Under-construction buildings — dynamic (animated progress bar)
-      const underConstruction = world.buildings
-        .filter(b => !b.isBuilt)
-        .sort((a, b) => (a.col + a.row) - (b.col + b.row))
-      for (const b of underConstruction) {
-        const { sx, sy } = tileToScreen(b.col, b.row, camera.x, camera.y, W, H)
-        const def = BUILDING_DEFS[b.type]?.iso
-        if (def) drawBox(ctx, sx, sy, getBuildingIso(b.type) ?? def, b.buildProgress)
+      // Construction scaffolds.
+      for (const p of world.parcels) {
+        if (p.state !== 'developing') continue
+        const { sx, sy } = tileToScreen(p.col, p.row, camera.x, camera.y, W, H)
+        drawScaffold(ctx, sx, sy, Math.round((p.progress / p.develop) * 100))
       }
 
-      // Resource stockpile at center tile (offset left; heart occupies center)
-      const { sx: csx, sy: csy } = tileToScreen(0, 0, camera.x, camera.y, W, H)
-      drawWoodPile(ctx, csx, csy, world.resources.wood)
-      drawFoodSacks(ctx, csx, csy, world.resources.food)
-
-      // Heart — campfire (Era 1) drawn on top of the nuclear ruin tile
-      const fuelFrac = world.heart.fuelTank / world.heart.fuelMax
-      drawHeart(ctx, csx, csy, world.heart.era, fuelFrac)
-
-      // Log piles scattered from felled trees
-      drawLogPiles(ctx, world, camera.x, camera.y, W, H)
-
-      // Citizens — zoom-correct culling
-      const cHW = W / (2 * zoom) + 80, cHH = H / (2 * zoom) + 80
-      const sorted = [...world.citizens].sort((a, b) => (a.x + a.y) - (b.x + b.y))
-      for (const v of sorted) {
-        const { sx, sy } = tileToScreen(v.x, v.y, camera.x, camera.y, W, H)
-        if (sx < W/2 - cHW || sx > W/2 + cHW || sy < H/2 - cHH || sy > H/2 + cHH) continue
-        drawVillager(ctx, sx, sy, v)
+      // Selected highlight.
+      const sel = selectedRef.current
+      if (sel) {
+        const e = sel.entity
+        const ex = sel.type === 'citizen' ? e.x : e.col
+        const ey = sel.type === 'citizen' ? e.y : e.row
+        const { sx, sy } = tileToScreen(ex, ey, camera.x, camera.y, W, H)
+        ctx.beginPath()
+        ctx.ellipse(sx, sy + TH2, 10, 5, 0, 0, Math.PI * 2)
+        ctx.strokeStyle = 'rgba(220,255,160,0.7)'; ctx.lineWidth = 1.5; ctx.stroke()
       }
 
-      // Caravan
-      if (world.caravan) {
-        const cv = world.caravan
-        const { sx, sy } = tileToScreen(cv.x, cv.y, camera.x, camera.y, W, H)
-        drawVillager(ctx, sx, sy, {
-          bounce: cv.bounce, task: null, role: 'worker',
-          carrying: cv.state === 'arriving' ? { resource: 'wood', amount: 1 } : null,
-          state: 'arriving', chopPhase: 0,
-        })
+      // Hearth stockpile + flame.
+      const { sx: hx, sy: hy } = tileToScreen(world.hearth.col, world.hearth.row, camera.x, camera.y, W, H)
+      drawStockpile(ctx, hx, hy, world.resources.wood, world.resources.food)
+      const flicker = Math.sin(world.tick * 0.3) * 1.2 + Math.sin(world.tick * 0.7) * 0.6
+      drawHearth(ctx, hx, hy, world.warmth ?? 0.5, flicker)
+
+      // Migrant groups.
+      for (const m of world.migrants) {
+        const { sx, sy } = tileToScreen(m.x, m.y, camera.x, camera.y, W, H)
+        drawMigrant(ctx, sx, sy, m)
       }
 
-      // Raiders
-      for (const rd of (world.raiders || [])) {
-        const { sx, sy } = tileToScreen(rd.x, rd.y, camera.x, camera.y, W, H)
-        drawVillager(ctx, sx, sy, {
-          bounce: rd.bounce, task: 'guard', role: 'guard',
-          carrying: null,
-          state: rd.arrived ? 'guard_rest' : 'guard_patrol', chopPhase: 0,
-        })
+      // Citizens, back-to-front.
+      const cit = [...world.citizens].sort((a, b) => (a.x + a.y) - (b.x + b.y))
+      for (const c of cit) {
+        const { sx, sy } = tileToScreen(c.x, c.y, camera.x, camera.y, W, H)
+        drawCitizen(ctx, sx, sy, c)
       }
 
-      // Reset to no-zoom for full-screen overlays
+      // ── Lighting & mood ───────────────────────────────────────────────────────
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+      const dark = darkness(world)
+      const glowR = (90 + 60 * (world.warmth ?? 0.5)) * zoom
+      const ghx = (hx) * zoom + W / 2 * (1 - zoom)
+      const ghy = (hy + TILE_H / 2) * zoom + H / 2 * (1 - zoom)
+      const glowA = 0.10 + dark * 0.5
+      const glow = ctx.createRadialGradient(ghx, ghy, 0, ghx, ghy, glowR)
+      glow.addColorStop(0, `rgba(255,170,70,${glowA})`)
+      glow.addColorStop(0.5, `rgba(255,130,40,${glowA * 0.3})`)
+      glow.addColorStop(1, 'rgba(0,0,0,0)')
+      ctx.globalCompositeOperation = 'screen'
+      ctx.fillStyle = glow
+      ctx.fillRect(ghx - glowR, ghy - glowR, glowR * 2, glowR * 2)
+      ctx.globalCompositeOperation = 'source-over'
 
-      // ── Light radius — radial darkness from heart outward ──────────────────────
-      // Heart tile (0,0) screen position after zoom transform
-      const hsx = csx * zoom + W / 2 * (1 - zoom)
-      const hsy = (csy + TILE_H / 2) * zoom + H / 2 * (1 - zoom)
-      const lightPx = world.heart.lightRadius * 32 * zoom
-
-      // Era light color tint — warm glow inside lit radius
-      const [lr, lg, lb] = ERA_DEFS[world.heart.era].lightColor
-      const tint = ctx.createRadialGradient(hsx, hsy, 0, hsx, hsy, lightPx * 0.9)
-      tint.addColorStop(0,   `rgba(${lr},${lg},${lb},0.20)`)
-      tint.addColorStop(0.5, `rgba(${lr},${lg},${lb},0.06)`)
-      tint.addColorStop(1,   'rgba(0,0,0,0)')
-      ctx.fillStyle = tint
-      ctx.fillRect(0, 0, W, H)
-
-      // Outer darkness — tiles beyond light radius fade to black
-      const dark = ctx.createRadialGradient(hsx, hsy, lightPx * 0.55, hsx, hsy, lightPx * 1.35)
-      dark.addColorStop(0, 'rgba(0,0,0,0)')
-      dark.addColorStop(0.6, 'rgba(0,0,0,0.15)')
-      dark.addColorStop(1,   'rgba(0,0,0,0.96)')
-      ctx.fillStyle = dark
-      ctx.fillRect(0, 0, W, H)
-
-      // HUD update — direct DOM, no React re-render
-      if (fuelBarRef.current) {
-        const pct = Math.round(fuelFrac * 100)
-        fuelBarRef.current.style.width = `${pct}%`
-        fuelBarRef.current.style.background = pct > 60 ? '#ff9930' : pct > 30 ? '#ffcc44' : '#ff4444'
-      }
-      if (eraLabelRef.current) eraLabelRef.current.textContent = ERA_DEFS[world.heart.era].name
-      if (timeLabelRef.current) {
-        timeLabelRef.current.textContent = `Day ${(world.day || 0) + 1} · ${world.season || 'spring'} · Year ${world.year || 1}`
-      }
-      if (resourcesRef.current) {
-        const r    = world.resources
-        const era  = world.era
-        const f    = v => Math.floor(v || 0)
-        const lines = [`🍎 ${f(r.food)}  🪵 ${f(r.wood)}  🪨 ${f(r.stone)}`]
-        if (era >= 2)  lines.push(`📦 ${f(r.planks)} planks  🧱 ${f(r.cut_stone)} stone`)
-        if (era >= 3)  lines.push(`🪨 ${f(r.coal)} coal  🔩 ${f(r.iron_ore)} ore  ⚙️ ${f(r.iron)} iron`)
-        if (era >= 4)  lines.push(`🔧 ${f(r.steel)} steel`)
-        if (era >= 5)  lines.push(`☢️ ${f(r.uranium)} uranium`)
-        if (world.stage >= 6 && world.researchPoints !== undefined)
-          lines.push(`🔬 ${Math.floor(world.researchPoints)}/100 research`)
-        resourcesRef.current.textContent = lines.join('\n')
-        resourcesRef.current.style.whiteSpace = 'pre'
-      }
-      // Events log — show last 5 events, newest on top (innerHTML guard avoids per-frame DOM churn)
-      if (eventsLogRef.current) {
-        const newHTML = world.events.slice(0, 5).map((e, i) => {
-          const alpha = 1 - i * 0.18
-          return `<div style="color:rgba(210,190,155,${alpha});font-size:11px;line-height:1.55;text-shadow:0 1px 3px rgba(0,0,0,0.9)">${e.msg}</div>`
-        }).join('')
-        if (newHTML !== lastEventsHTMLRef.current) {
-          eventsLogRef.current.innerHTML = newHTML
-          lastEventsHTMLRef.current = newHTML
-        }
-      }
-
-      if (crisisRef.current) {
-        const timer = world.collapseTimer || 0
-        if (timer > 0) {
-          const pct   = Math.round((timer / 600) * 100)
-          const label = world.era === 5 ? `☢️ MELTDOWN ${pct}%` : `💀 COLLAPSE ${pct}%`
-          crisisRef.current.textContent = label
-          crisisRef.current.style.display = 'block'
-          crisisRef.current.style.color   = world.era === 5 ? '#80ff60' : '#ff4444'
-          crisisRef.current.style.opacity = (world.tick % 30 < 15) ? '1' : '0.4'
-        } else {
-          crisisRef.current.style.display = 'none'
-        }
-      }
-
-      // ── Ambient building glows — always on ────────────────────────────────────
-      {
-        ctx.save()
-        ctx.setTransform(zoomTx, 0, 0, zoomTx, zoomEx, zoomEy)
-        ctx.globalCompositeOperation = 'screen'
-        const lHW = W / (2 * zoom) + 100, lHH = H / (2 * zoom) + 100
-        for (const b of world.buildings) {
-          if (!b.isBuilt) continue
-          const { sx, sy } = tileToScreen(b.col, b.row, camera.x, camera.y, W, H)
-          if (sx < W/2 - lHW || sx > W/2 + lHW || sy < H/2 - lHH || sy > H/2 + lHH) continue
-          if (glowSpriteRef.current) ctx.drawImage(glowSpriteRef.current, sx - 38, sy - 20)
-        }
-        // Heart glow — scales with fuel level
-        {
-          const { sx: hgx, sy: hgy } = tileToScreen(0, 0, camera.x, camera.y, W, H)
-          const [er, eg, eb] = ERA_DEFS[world.heart.era].lightColor
-          const heartR = 55 + 35 * fuelFrac
-          const hg = ctx.createRadialGradient(hgx, hgy, 0, hgx, hgy, heartR)
-          hg.addColorStop(0,    `rgba(${er},${eg},${eb},${0.35 * fuelFrac})`)
-          hg.addColorStop(0.45, `rgba(${er},${eg},${eb},${0.12 * fuelFrac})`)
-          hg.addColorStop(1,    'rgba(0,0,0,0)')
-          ctx.fillStyle = hg
-          ctx.fillRect(hgx - heartR, hgy - heartR, heartR * 2, heartR * 2)
-        }
-        ctx.restore()
-      }
-
-      // Vignette — full-screen, no zoom (cached; recreated only on resize)
-      ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
-      {
-        const vc = vignetteRef.current
-        const rW = Math.round(W), rH = Math.round(H)
-        if (!vc || vc.width !== rW || vc.height !== rH) {
-          const nc = document.createElement('canvas')
-          nc.width = rW; nc.height = rH
-          const vx = nc.getContext('2d')
-          const vg = vx.createRadialGradient(W/2, H/2, H*0.2, W/2, H/2, H*0.85)
-          vg.addColorStop(0, 'rgba(0,0,0,0)')
-          vg.addColorStop(1, 'rgba(0,0,0,0.55)')
-          vx.fillStyle = vg
-          vx.fillRect(0, 0, rW, rH)
-          vignetteRef.current = nc
-        }
-        ctx.drawImage(vignetteRef.current, 0, 0)
-      }
-
-      // Real-world time tint — dark blue-black at night, nothing during the day
-      const nightOp = nightOpacityRef.current
-      if (nightOp > 0) {
-        ctx.fillStyle = `rgba(0,20,40,${nightOp})`
+      if (dark > 0) {
+        ctx.fillStyle = `rgba(18,28,54,${dark})`
         ctx.fillRect(0, 0, W, H)
+      }
+
+      // Vignette (cached).
+      const vc   = vignetteRef.current
+      const rW   = Math.round(W), rH = Math.round(H)
+      if (!vc || vc.width !== rW || vc.height !== rH) {
+        const nc = document.createElement('canvas'); nc.width = rW; nc.height = rH
+        const vx = nc.getContext('2d')
+        const vg = vx.createRadialGradient(W / 2, H / 2, H * 0.25, W / 2, H / 2, H * 0.85)
+        vg.addColorStop(0, 'rgba(0,0,0,0)'); vg.addColorStop(1, 'rgba(0,0,0,0.45)')
+        vx.fillStyle = vg; vx.fillRect(0, 0, rW, rH)
+        vignetteRef.current = nc
+      }
+      ctx.drawImage(vignetteRef.current, 0, 0)
+
+      // ── Debug overlay ─────────────────────────────────────────────────────────
+      if (debugRef.current) {
+        const p    = world.pressures, cp = world._confParts || {}
+        const gov  = world.governor
+        const counts = {}
+        for (const par of world.parcels) counts[par.type] = (counts[par.type] || 0) + 1
+
+        const beds         = world.buildings.filter(b => b.type === 'hut' && b.isBuilt).length
+        const freeBeds     = Math.max(0, beds - world.households.length)
+        const dayN         = Math.floor(world.tick / CYCLE_TICKS)
+        const fDays        = foodDays(world)
+        const daysSinceP   = ((world.tick - (gov.lastVisibleProjectTick || 0)) / CYCLE_TICKS).toFixed(1)
+
+        // Band eligibility
+        const workCount    = world.parcels.filter(q =>
+          q.state === 'active' && ['field','forage','woodlot'].includes(q.type)).length
+        const storCount    = world.parcels.filter(q => q.type === 'storage' && q.state === 'active').length
+        const bandBlockers = []
+        if (world.band !== 'village') {
+          if (world.citizens.length < 70) bandBlockers.push(`pop ${world.citizens.length}<70`)
+          if (dayN < 30)                  bandBlockers.push(`day ${dayN}<30`)
+          if (workCount < 3)              bandBlockers.push(`work parcels ${workCount}<3`)
+          if (storCount < 1)              bandBlockers.push('need storage')
+          if (world.confidence < 0.65)    bandBlockers.push(`conf ${(world.confidence*100).toFixed(0)}%<65%`)
+        }
+        const stableFor = world.bandStableSince
+          ? ((world.tick - world.bandStableSince) / CYCLE_TICKS).toFixed(1)
+          : '0'
+
+        // Migration blockers
+        const migBlocks = []
+        if (world.confidence < MIGRATION_CONFIDENCE) migBlocks.push(`conf ${(world.confidence*100).toFixed(0)}%<${(MIGRATION_CONFIDENCE*100).toFixed(0)}%`)
+        const taken = new Set(world.households.map(h => h.homeBuildingId))
+        const freeHuts = world.buildings.filter(b => b.type === 'hut' && b.isBuilt && !taken.has(b.id)).length
+        if (freeHuts === 0)              migBlocks.push('no free huts')
+        if (world.migrants.length > 0)   migBlocks.push('wave in progress')
+        const migStatus = migBlocks.length === 0 ? 'open' : `BLOCKED (${migBlocks.join(', ')})`
+
+        const sortRebuildAge = ((now2 - sortTimeRef.current) / 1000).toFixed(1)
+
+        debugRef.current.textContent = [
+          `${clockLabel(world)}   day ${dayN}   speed ${speedRef.current}×`,
+          ``,
+          `── Population ───────────────────────`,
+          `citizens ${world.citizens.length}   households ${world.households.length}   migrants ${world.migrants.length}`,
+          `huts ${beds}   free beds ${freeBeds}`,
+          ``,
+          `── Economy ──────────────────────────`,
+          `food ${world.resources.food.toFixed(1)}/${world.storageCap.food}   (${fDays.toFixed(1)} days)`,
+          `wood ${world.resources.wood.toFixed(1)}/${world.storageCap.wood}`,
+          ``,
+          `── Confidence & Pressure ────────────`,
+          `confidence ${(world.confidence*100).toFixed(0)}%  food ${(cp.food*100||0).toFixed(0)} shelter ${(cp.shelter*100||0).toFixed(0)} warmth ${(cp.warmth*100||0).toFixed(0)} calm ${(cp.calm*100||0).toFixed(0)}`,
+          `pressure  food ${(p.food*100).toFixed(0)}/${(PRESSURE.food*100).toFixed(0)}  wood ${(p.wood*100).toFixed(0)}/${(PRESSURE.wood*100).toFixed(0)}  shelter ${(p.shelter*100).toFixed(0)}/${(PRESSURE.shelter*100).toFixed(0)}  road ${(p.road*100).toFixed(0)}/${(PRESSURE.road*100).toFixed(0)}`,
+          ``,
+          `── Migration ────────────────────────`,
+          `status: ${migStatus}`,
+          ``,
+          `── Governor ─────────────────────────`,
+          `action: ${gov.lastAction}`,
+          `days since visible project: ${daysSinceP}`,
+          `parcels  ${Object.entries(counts).map(([t, n]) => `${t}:${n}`).join('  ')}`,
+          ``,
+          `── Development Band ─────────────────`,
+          `band: ${world.band}${world.band === 'settlement' ? '' : ' ✦'}`,
+          world.band === 'village'
+            ? 'conditions: met'
+            : `stable for: ${stableFor} days  blockers: ${bandBlockers.join(', ') || 'none'}`,
+          ``,
+          `── Render / Perf ────────────────────`,
+          `revealed tiles: ${world.revealedTiles.size}   sort age: ${sortRebuildAge}s`,
+          `save: ${saveStatusRef.current}   seed: ${Math.floor(world.seed)}`,
+          ``,
+          `── Rejected candidates ──────────────`,
+          ...(gov.notes && gov.notes.length > 0 ? gov.notes.map(n => `  ${n}`) : ['  (none)']),
+        ].join('\n')
       }
 
       raf = requestAnimationFrame(draw)
     }
     raf = requestAnimationFrame(draw)
 
-    // ── Tap → inspect entity ──────────────────────────────────────────────────
-    function handleTap(clientX, clientY) {
-      const dpr    = dprRef.current
-      const W      = canvas.width  / dpr
-      const H      = canvas.height / dpr
-      const camera = cameraRef.current
-      const world  = worldRef.current
-      const TW2 = 32, TH2 = 16
-      const zoom = camera.zoom || 1
+    // ── Input ─────────────────────────────────────────────────────────────────
+    let pointerDownAt = null
 
-      // Inverse isometric transform accounting for zoom:
-      // Forward: sx = ((col-row)*TW2 - camX) * zoom + W/2
-      // Inverse: (col-row) = ((screenX - W/2) / zoom + camX) / TW2
-      const a    = ((clientX - W / 2) / zoom + camera.x) / TW2   // col - row
-      const b    = ((clientY - H / 2) / zoom + camera.y) / TH2   // col + row
-      const wCol = (a + b) / 2
-      const wRow = (b - a) / 2
-
-      // Buildings checked FIRST — they're stationary so prioritise them at close range
-      let bestB = null, bestBD = 0.85
-      for (const bldg of world.buildings) {
-        const d = Math.hypot(bldg.col - wCol, bldg.row - wRow)
-        if (d < bestBD) { bestBD = d; bestB = bldg }
-      }
-      if (bestB) {
-        const res  = (bestB.residents || []).length
-        const work = (bestB.workerIds || []).length
-        setSelected({ type: 'building', data: { ...bestB, _res: res, _work: work } })
-        return
-      }
-
-      // Then citizens within ~1.8 tiles
-      let bestC = null, bestD = 1.8
-      for (const c of world.citizens) {
-        const d = Math.hypot(c.x - wCol, c.y - wRow)
-        if (d < bestD) { bestD = d; bestC = c }
-      }
-      if (bestC) {
-        setSelected({ type: 'citizen', data: { ...bestC } })
-        return
-      }
-
-      setSelected(null)
-    }
-
-    // ── Pointer events (unified mouse + touch, reliable tap detection) ───────────
-    // Uses PointerEvents API: one handler for mouse, pen, and touch.
-    // setPointerCapture keeps events routed to canvas even if finger drifts off.
-
-    const onPointerDown = (e) => {
-      if (dragRef.current) return  // ignore extra fingers
+    const onDown = (e) => {
       canvas.setPointerCapture(e.pointerId)
-      dragRef.current = {
-        id: e.pointerId,
-        x: e.clientX, y: e.clientY,
-        startX: e.clientX, startY: e.clientY,
-        t: Date.now(), moved: false,
-      }
+      dragRef.current  = { id: e.pointerId, x: e.clientX, y: e.clientY }
+      pointerDownAt    = { x: e.clientX, y: e.clientY }
     }
-
-    const onPointerMove = (e) => {
-      const d = dragRef.current
-      if (!d || d.id !== e.pointerId) return
-      const dx = e.clientX - d.x
-      const dy = e.clientY - d.y
-      if (Math.hypot(e.clientX - d.startX, e.clientY - d.startY) > 14) d.moved = true
-      if (d.moved) panCamera(cameraRef.current, dx, dy)
-      d.x = e.clientX
-      d.y = e.clientY
+    const onMove = (e) => {
+      const d = dragRef.current; if (!d || d.id !== e.pointerId) return
+      panCamera(cameraRef.current, e.clientX - d.x, e.clientY - d.y)
+      d.x = e.clientX; d.y = e.clientY
     }
-
-    const onPointerUp = (e) => {
-      const d = dragRef.current
-      if (!d || d.id !== e.pointerId) return
-      // Tap: small movement AND fast enough
-      if (!d.moved && (Date.now() - d.t) < 500) handleTap(d.startX, d.startY)
+    const onUp = (e) => {
+      if (dragRef.current?.id !== e.pointerId) return
       dragRef.current = null
+
+      // Click = pointer didn't move much.
+      if (pointerDownAt) {
+        const dx = Math.abs(e.clientX - pointerDownAt.x)
+        const dy = Math.abs(e.clientY - pointerDownAt.y)
+        if (dx < 5 && dy < 5) {
+          const dpr = dprRef.current
+          const W   = canvas.width / dpr
+          const H   = canvas.height / dpr
+          const hit = hitTestClick(worldRef.current, cameraRef.current, e.clientX, e.clientY, W, H)
+          selectedRef.current = hit
+          setSelected(hit)
+        }
+        pointerDownAt = null
+      }
     }
 
     const onKey = (e) => {
-      if (e.key === 'c' || e.key === 'C') setCal(v => !v)
-      // Triple-D within 1.5 seconds opens dev menu
       if (e.key === 'd' || e.key === 'D') {
-        const now = Date.now()
-        devKeyTimesRef.current.push(now)
-        devKeyTimesRef.current = devKeyTimesRef.current.filter(t => now - t < 1500)
-        if (devKeyTimesRef.current.length >= 3) {
-          devKeyTimesRef.current = []
-          setDevMenu(v => !v)
-        }
+        setDebug(v => { debugRef.current && (debugRef.current.style.display = v ? 'none' : 'block'); return !v })
+      } else if (e.key === 'n' || e.key === 'N') {
+        worldRef.current    = foundWorld()
+        sortedKeysRef.current = null
+        sortVersionRef.current = -1
+        cameraRef.current   = createCamera()
+        selectedRef.current = null
+        setSelected(null)
+        clearSave()
+      } else if (e.key === 's' || e.key === 'S') {
+        const ok = saveWorld(worldRef.current)
+        saveStatusRef.current = ok ? 'ok' : 'failed'
+      } else if (e.key >= '1' && e.key <= '5') {
+        const s = SPEEDS[+e.key - 1]; speedRef.current = s; setSpeed(s)
       }
     }
 
-    canvas.addEventListener('pointerdown',   onPointerDown)
-    canvas.addEventListener('pointermove',   onPointerMove)
-    canvas.addEventListener('pointerup',     onPointerUp)
-    canvas.addEventListener('pointercancel', onPointerUp)
-    window.addEventListener('keydown',       onKey)
+    canvas.addEventListener('pointerdown', onDown)
+    canvas.addEventListener('pointermove', onMove)
+    canvas.addEventListener('pointerup',   onUp)
+    canvas.addEventListener('pointercancel', onUp)
+    window.addEventListener('keydown', onKey)
 
     return () => {
-      cancelAnimationFrame(raf)
-      clearInterval(simInterval)
-      clearInterval(nightInterval)
-      ro.disconnect()
-      canvas.removeEventListener('pointerdown',   onPointerDown)
-      canvas.removeEventListener('pointermove',   onPointerMove)
-      canvas.removeEventListener('pointerup',     onPointerUp)
-      canvas.removeEventListener('pointercancel', onPointerUp)
-      window.removeEventListener('keydown',    onKey)
+      cancelAnimationFrame(raf); clearInterval(simInterval); ro.disconnect()
+      canvas.removeEventListener('pointerdown', onDown)
+      canvas.removeEventListener('pointermove', onMove)
+      canvas.removeEventListener('pointerup',   onUp)
+      canvas.removeEventListener('pointercancel', onUp)
+      window.removeEventListener('keydown', onKey)
     }
   }, [])
 
@@ -812,189 +504,42 @@ export default function App() {
         style={{ display: 'block', width: '100vw', height: '100vh', touchAction: 'none', cursor: 'grab' }}
       />
 
-      {/* Nuclear meltdown flash overlay */}
-      <div ref={flashRef} style={{
-        position: 'fixed', inset: 0, zIndex: 100,
-        background: 'rgba(80,255,60,0.85)',
-        pointerEvents: 'none',
-        opacity: 0,
-      }} />
-      {/* Era + Fuel HUD — top-left, DOM-ref updated each frame (no re-render) */}
-      <div style={{
-        position: 'fixed', top: 14, left: 14, zIndex: 10,
-        background: 'rgba(0,0,0,0.55)', borderRadius: 8,
-        padding: '8px 12px', fontFamily: 'monospace',
-        minWidth: 140, backdropFilter: 'blur(4px)',
-        border: '1px solid rgba(255,200,80,0.18)',
-      }}>
-        <div ref={eraLabelRef} style={{ color: '#ffcc44', fontSize: 12, fontWeight: 'bold', letterSpacing: 1 }}>
-          Tribal
-        </div>
-        <div ref={timeLabelRef} style={{ color: '#886644', fontSize: 10, marginBottom: 5, marginTop: 1 }}>
-          Day 1
-        </div>
-        {/* Fuel bar — tap 5× to open dev menu */}
-        <div onClick={handleFuelTap} style={{ cursor: 'default', userSelect: 'none' }}>
-          <div style={{ fontSize: 10, color: '#888', marginBottom: 3 }}>FUEL</div>
-          <div style={{ background: '#111', borderRadius: 3, height: 6, overflow: 'hidden' }}>
-            <div ref={fuelBarRef} style={{ width: '100%', height: '100%', background: '#ff9930', transition: 'width 0.3s, background 0.3s' }} />
-          </div>
-        </div>
-        {/* Resource counts */}
-        <div ref={resourcesRef} style={{ marginTop: 8, fontSize: 11, color: '#aaa', letterSpacing: 0.5 }}>
-          🍎 0  🪵 0  🪨 0
-        </div>
-        {/* Fuel crisis warning — hidden by default, shown by crisisRef update */}
-        <div ref={crisisRef} style={{
-          display: 'none', marginTop: 6,
-          fontSize: 11, fontWeight: 'bold', letterSpacing: 1,
-          color: '#ff4444',
-        }} />
-      </div>
-
-      {/* Events log — bottom-left, last 5 events, DOM-ref updated each frame */}
-      <div
-        ref={eventsLogRef}
+      {/* Debug overlay — D key */}
+      <pre
+        ref={debugRef}
         style={{
-          position: 'fixed', bottom: 18, left: 14, zIndex: 10,
-          maxWidth: 290, pointerEvents: 'none',
-          fontFamily: 'monospace',
+          position: 'fixed', top: 12, left: 12, margin: 0, display: 'none', zIndex: 10,
+          font: '11px/1.5 monospace', color: '#bfe0a0', whiteSpace: 'pre',
+          background: 'rgba(6,12,6,0.6)', padding: '8px 12px', borderRadius: 6,
+          border: '1px solid rgba(160,220,120,0.18)', pointerEvents: 'none',
         }}
       />
 
-      {/* Info panel — shown when a citizen or building is tapped */}
+      {/* Speed controls — visible only in debug mode */}
+      {debug && (
+        <div style={{ position: 'fixed', bottom: 14, left: 12, zIndex: 10, display: 'flex', gap: 6 }}>
+          {SPEEDS.map(s => (
+            <button key={s} onClick={() => { speedRef.current = s; setSpeed(s) }} style={{
+              padding: '3px 10px', borderRadius: 4, cursor: 'pointer', font: '11px monospace',
+              background: speed === s ? 'rgba(160,220,120,0.2)' : 'rgba(255,255,255,0.05)',
+              color:  speed === s ? '#cdeaa8' : '#789',
+              border: `1px solid ${speed === s ? 'rgba(160,220,120,0.4)' : 'rgba(255,255,255,0.08)'}`,
+            }}>{s}×</button>
+          ))}
+          <span style={{ font: '10px monospace', color: '#567', alignSelf: 'center', marginLeft: 8 }}>
+            D debug · N new world · S save · 1–5 speed · drag to pan · click to inspect
+          </span>
+        </div>
+      )}
+
+      {/* Inspector panel */}
       {selected && (
-        <div
-          onClick={() => setSelected(null)}
-          style={{
-            position: 'fixed', bottom: 0, left: 0, right: 0, zIndex: 20,
-            background: 'rgba(8,12,24,0.92)',
-            borderTop: '1px solid rgba(255,255,255,0.10)',
-            padding: '16px 20px 24px',
-            fontFamily: 'monospace', color: '#ccc', fontSize: 13,
-            backdropFilter: 'blur(6px)',
-          }}
-        >
-          {selected.type === 'citizen' ? (
-            <>
-              <div style={{ color: '#ffcc44', fontWeight: 'bold', marginBottom: 8, fontSize: 15 }}>👤 Worker</div>
-              {(() => {
-                const TASK_L  = {
-                  forage: 'Foraging', chop: 'Chopping wood', quarry: 'Quarrying stone', build: 'Building',
-                  mine_coal: 'Mining coal', mine_iron: 'Mining iron', mine_uranium: 'Mining uranium',
-                  decontaminate: 'Decontaminating', guard: 'Patrolling',
-                }
-                const STATE_L = {
-                  idle: 'Looking for work', going_to_source: 'Heading out',
-                  working: 'Working', going_to_storage: 'Returning to stockpile',
-                  going_to_build: 'Heading to build site', building: 'Building',
-                  going_home: 'Heading home', sleeping: 'Sleeping', arriving: 'Arriving',
-                  guard_patrol: 'On patrol', guard_rest: 'Resting (off duty)',
-                }
-                const d = selected.data
-                return (
-                  <>
-                    <div>Role: <span style={{ color: '#aef' }}>{d.role === 'guard' ? '⚔️ Guard' : '👷 Worker'}</span></div>
-                    <div>Task: <span style={{ color: '#aef' }}>{d.task ? (TASK_L[d.task] || d.task) : 'Idle'}</span></div>
-                    <div>Status: <span style={{ color: '#aef' }}>{STATE_L[d.state] || d.state.replace(/_/g, ' ')}</span></div>
-                    <div>Home: <span style={{ color: '#aef' }}>{d.homeId != null ? `House #${d.homeId}` : 'Homeless'}</span></div>
-                    {d.carrying && <div>Carrying: <span style={{ color: '#aef' }}>{d.carrying.amount} {d.carrying.resource}</span></div>}
-                  </>
-                )
-              })()}
-            </>
-          ) : (
-            <>
-              <div style={{ color: '#ffcc44', fontWeight: 'bold', marginBottom: 8, fontSize: 15 }}>
-                🏠 {(BUILDING_DEFS[selected.data.type]?.label || selected.data.type)}
-              </div>
-              <div>Status: <span style={{ color: '#aef' }}>{selected.data.isBuilt ? 'Built' : `Building… ${selected.data.buildProgress}%`}</span></div>
-              {selected.data._res > 0 && <div>Residents: <span style={{ color: '#aef' }}>{selected.data._res}</span></div>}
-              {selected.data._work > 0 && <div>Workers: <span style={{ color: '#aef' }}>{selected.data._work}</span></div>}
-              <div>Location: <span style={{ color: '#aef' }}>({selected.data.col}, {selected.data.row})</span></div>
-            </>
-          )}
-          <div style={{ marginTop: 10, color: '#555', fontSize: 11 }}>tap to dismiss</div>
-        </div>
+        <Inspector
+          hit={selected}
+          world={worldRef.current}
+          onClose={() => { setSelected(null); selectedRef.current = null }}
+        />
       )}
-
-      {/* Dev menu — opened by pressing D three times within 1.5 seconds */}
-      {devMenu && (
-        <div style={{
-          position: 'fixed', top: '50%', left: '50%', transform: 'translate(-50%,-50%)',
-          zIndex: 200, background: 'rgba(8,12,20,0.96)', borderRadius: 10,
-          padding: '20px 24px', fontFamily: 'monospace', color: '#aaa', fontSize: 13,
-          border: '1px solid rgba(255,200,80,0.2)', minWidth: 300,
-          backdropFilter: 'blur(10px)',
-        }}>
-          <div style={{ color: '#ffcc44', fontWeight: 'bold', fontSize: 14, marginBottom: 16, letterSpacing: 2 }}>
-            ⚙️ DEV MENU
-          </div>
-
-          {/* Speed */}
-          <div style={{ marginBottom: 14 }}>
-            <div style={{ color: '#555', fontSize: 10, letterSpacing: 1, marginBottom: 6 }}>SPEED</div>
-            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-              {[0.25, 0.5, 1, 2, 5, 20].map(s => (
-                <button key={s} onClick={() => { speedRef.current = s; setSpeed(s) }} style={{
-                  padding: '4px 10px', borderRadius: 4, cursor: 'pointer',
-                  fontFamily: 'monospace', fontSize: 12,
-                  background: speed === s ? 'rgba(255,200,80,0.18)' : 'rgba(255,255,255,0.05)',
-                  color: speed === s ? '#ffcc44' : '#777',
-                  border: `1px solid ${speed === s ? 'rgba(255,200,80,0.45)' : 'rgba(255,255,255,0.08)'}`,
-                }}>{s}×</button>
-              ))}
-            </div>
-          </div>
-
-          {/* Jump to era */}
-          <div style={{ marginBottom: 14 }}>
-            <div style={{ color: '#555', fontSize: 10, letterSpacing: 1, marginBottom: 6 }}>JUMP TO ERA</div>
-            <div style={{ display: 'flex', gap: 6 }}>
-              {[1,2,3,4,5,6].map(e => (
-                <button key={e} onClick={() => jumpToEra(e)} style={{
-                  padding: '4px 12px', borderRadius: 4, cursor: 'pointer',
-                  fontFamily: 'monospace', fontSize: 12,
-                  background: 'rgba(255,255,255,0.05)', color: '#888',
-                  border: '1px solid rgba(255,255,255,0.08)',
-                }}>Era {e}</button>
-              ))}
-            </div>
-          </div>
-
-          {/* Force actions */}
-          <div style={{ display: 'flex', gap: 8 }}>
-            <button onClick={forceEvent} style={{
-              padding: '5px 14px', borderRadius: 4, cursor: 'pointer',
-              fontFamily: 'monospace', fontSize: 12,
-              background: 'rgba(80,200,100,0.12)', color: '#80cc80',
-              border: '1px solid rgba(80,200,100,0.28)',
-            }}>Force Event</button>
-            <button onClick={forceCollapse} style={{
-              padding: '5px 14px', borderRadius: 4, cursor: 'pointer',
-              fontFamily: 'monospace', fontSize: 12,
-              background: 'rgba(255,60,40,0.12)', color: '#ff8060',
-              border: '1px solid rgba(255,60,40,0.28)',
-            }}>Force Collapse</button>
-          </div>
-
-          <div style={{ marginTop: 16, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-            <div style={{ color: '#383838', fontSize: 10 }}>D × 3 or fuel × 5 to toggle</div>
-            <button onClick={() => setDevMenu(false)} style={{
-              padding: '4px 14px', borderRadius: 4, cursor: 'pointer',
-              fontFamily: 'monospace', fontSize: 12,
-              background: 'rgba(255,255,255,0.06)', color: '#666',
-              border: '1px solid rgba(255,255,255,0.1)',
-            }}>Close</button>
-          </div>
-        </div>
-      )}
-
-      <div
-        style={{ position: 'fixed', bottom: 0, right: 0, width: 60, height: 60, zIndex: 99 }}
-        onClick={() => setCal(v => !v)}
-      />
-      {cal && <Calibration onClose={() => setCal(false)} />}
     </>
   )
 }

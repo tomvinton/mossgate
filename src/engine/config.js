@@ -1,346 +1,206 @@
-// ── Mossgate — Config ──────────────────────────────────────────────────────────
+// ── MossGate — Configuration & tuning ──────────────────────────────────────────
+//
+// MossGate is a slow, zero-player civilisation terrarium. Everything here is tuned
+// for a CALM default experience: small visible changes over minutes, settlement
+// changes over hours. Dev speed multipliers (see App.jsx) compress time for testing
+// WITHOUT changing any of these constants — the world only ever runs more ticks per
+// real second, never differently.
+//
+// One golden rule lives in these numbers: growth is throttled by LAND, LABOUR and
+// CONFIDENCE — never by a hidden survival death-timer. Nothing here drains toward a
+// hard reset.
 
-export const TILE_W   = 64
-export const TILE_H   = 32
-export const UNIT_H   = 20
-export const TICK_MS  = 50   // 20 ticks/sec
+// ── Isometric geometry ─────────────────────────────────────────────────────────
+export const TILE_W = 64
+export const TILE_H = 32
+export const UNIT_H = 20    // pixel height of one "storey" for extruded boxes
 
-// ── Era definitions ────────────────────────────────────────────────────────────
-// Each era has a heart building, fuel type, light properties, and population cap.
-// fuelDrainPerTick: units drained per tick at 1× speed
-// lightRadius: tile-space radius at full fuel
-// lightColor: [r, g, b] ambient tint inside light radius
-// fuelResource: null → no fuel needed (Era 6 solar)
-export const ERA_DEFS = {
-  1: {
-    name:             'Tribal',
-    heartType:        'campfire',
-    fuelResource:     'wood',
-    fuelDrainPerTick: 0.002,
-    fuelMax:          150,
-    lightRadius:      14,
-    lightColor:       [255, 140, 45],
-    maxPop:           12,
-  },
-  2: {
-    name:             'Ancient',
-    heartType:        'hearth',
-    fuelResource:     'planks',
-    fuelDrainPerTick: 0.0025,
-    fuelMax:          200,
-    lightRadius:      22,
-    lightColor:       [255, 170, 60],
-    maxPop:           30,
-  },
-  3: {
-    name:             'Medieval',
-    heartType:        'forge',
-    fuelResource:     'coal',
-    fuelDrainPerTick: 0.003,
-    fuelMax:          280,
-    lightRadius:      30,
-    lightColor:       [255, 130, 50],
-    maxPop:           60,
-  },
-  4: {
-    name:             'Industrial',
-    heartType:        'boiler',
-    fuelResource:     'coal',
-    fuelDrainPerTick: 0.005,
-    fuelMax:          400,
-    lightRadius:      44,
-    lightColor:       [255, 110, 30],
-    maxPop:           150,
-  },
-  5: {
-    name:             'Nuclear',
-    heartType:        'reactor',
-    fuelResource:     'uranium',
-    fuelDrainPerTick: 0.0008,
-    fuelMax:          80,
-    lightRadius:      65,
-    lightColor:       [100, 255, 80],
-    maxPop:           999,
-  },
-  6: {
-    name:             'Clean',
-    heartType:        'solar',
-    fuelResource:     null,    // solar — no fuel drain
-    fuelDrainPerTick: 0,
-    fuelMax:          999,
-    lightRadius:      80,
-    lightColor:       [180, 230, 255],
-    maxPop:           9999,
-  },
+// ── Simulation clock ───────────────────────────────────────────────────────────
+// The sim advances in fixed ticks. At 1× the loop runs TICK_MS apart; dev speed
+// simply runs N ticks per loop. All durations below are expressed in ticks with the
+// real-time-at-1× noted, so the calm pacing is legible at a glance.
+export const TICK_MS = 50          // 20 ticks per second at 1×
+
+export const TICKS_PER_SEC = 1000 / TICK_MS   // 20
+const SEC = TICKS_PER_SEC
+const MIN = 60 * SEC                            // 1200 ticks = 1 real minute at 1×
+
+// ── Day / night / seasons ──────────────────────────────────────────────────────
+// A gentle clock you notice when you check back. ~5 min per full day at 1×.
+// Citizens work by day and rest by night, which is the cozy heartbeat of the scene.
+export const DAY_TICKS   = Math.round(3.2 * MIN)   // daylight
+export const NIGHT_TICKS = Math.round(2.0 * MIN)   // night
+export const CYCLE_TICKS = DAY_TICKS + NIGHT_TICKS // one full day
+export const DUSK_TICKS  = Math.round(0.5 * MIN)   // fade length at each edge
+export const DAWN_TICKS  = Math.round(0.5 * MIN)
+
+export const SEASONS       = ['spring', 'summer', 'autumn', 'winter']
+export const DAYS_PER_SEASON = 6                   // a season is a handful of days
+export const SEASON_TICKS  = DAYS_PER_SEASON * CYCLE_TICKS
+
+// Seasonal multiplier on outdoor yields (food). Winter is lean → more foragers,
+// less building — a visible rhythm, never a famine spiral.
+export const SEASON_YIELD = { spring: 1.1, summer: 1.25, autumn: 1.0, winter: 0.55 }
+
+// ── Movement ───────────────────────────────────────────────────────────────────
+// Distance and travel time MATTER — that is why roads are worth building. A citizen
+// crossing ~12 tiles of open ground takes ~30s at 1×; on a path they move ~1.8× as
+// fast, so a long supply line visibly rewards a road.
+export const WALK_SPEED      = 0.020   // tiles per tick on open ground
+export const PATH_SPEED_MULT = 1.8     // multiplier when standing on a path tile
+export const ARRIVE_EPS      = 0.12    // how close counts as "arrived" at a tile
+
+// ── Work cycles ────────────────────────────────────────────────────────────────
+// Production is LABOUR-driven and VISIBLE: a worker walks to a parcel, performs a
+// work cycle, then hauls the yield back to storage. No invisible passive ticking.
+export const CARRY_CAPACITY  = 4       // units a worker hauls per trip
+export const WORK_CYCLE = {
+  forage: { ticks: Math.round(7  * SEC), yield: 1, resource: 'food' },
+  farm:   { ticks: Math.round(9  * SEC), yield: 2, resource: 'food' },
+  chop:   { ticks: Math.round(11 * SEC), yield: 2, resource: 'wood' },
+}
+export const DEPOSIT_TICKS   = Math.round(1.2 * SEC)
+
+// Rest / social beats so citizens never robot-chain forever. After a few work trips
+// a worker takes a breather at the hearth.
+export const TRIPS_BEFORE_REST = 3
+export const REST_TICKS_MIN  = Math.round(6  * SEC)
+export const REST_TICKS_MAX  = Math.round(14 * SEC)
+export const IDLE_WANDER_CHANCE = 0.25   // chance an idle citizen ambles a little
+
+// ── The hearth ─────────────────────────────────────────────────────────────────
+// The hearth is the heart of the settlement — a cozy landmark, NOT a fuel tank that
+// can collapse the world. Firewood feeds it for warmth/comfort (affecting confidence
+// and visuals), but letting it run low never kills anyone; it just makes the place
+// feel bleak and slows migration until wood returns.
+export const HEARTH = {
+  col: 0, row: 0,
+  woodComfortTarget: 30,   // wood stock at/above which the settlement feels warm
+  burnPerDay: 6,           // firewood the hearth consumes per full day
 }
 
-// ── Tasks — what a general worker can be assigned to ──────────────────────────
-// resultTile: what the source tile becomes after work (null = unchanged)
-// decayAfter: ticks until resultTile auto-reverts (0 = permanent)
-// resource: null means no yield (decontaminate task)
-export const TASKS = {
-  // Era 1
-  forage:        { resource: 'food',     yield: 1, workTicks: 100, sourceTile: 'forest',       chops: false, resultTile: null,    decayAfter: 0,    color: '#78d878', label: 'Foraging' },
-  chop:          { resource: 'wood',     yield: 2, workTicks: 140, sourceTile: 'forest',       chops: true,  resultTile: 'stump', decayAfter: 600,  color: '#c8a060', label: 'Chopping wood' },
-  quarry:        { resource: 'stone',    yield: 3, workTicks: 200, sourceTile: 'rock',         chops: true,  resultTile: 'grass', decayAfter: 0,    color: '#9a9a8a', label: 'Quarrying stone' },
-  build:         { resource: null,       yield: 0, workTicks: 0,   sourceTile: null,           chops: false, resultTile: null,    decayAfter: 0,    color: '#e8a840', label: 'Building' },
-  // Era 3
-  mine_coal:     { resource: 'coal',     yield: 3, workTicks: 160, sourceTile: 'coal_seam',    chops: true,  resultTile: 'rock',  decayAfter: 0,    color: '#555560', label: 'Mining coal' },
-  mine_iron:     { resource: 'iron_ore', yield: 2, workTicks: 200, sourceTile: 'iron_deposit', chops: true,  resultTile: 'rock',  decayAfter: 0,    color: '#aa7060', label: 'Mining iron' },
-  // Era 5
-  mine_uranium:  { resource: 'uranium',  yield: 1, workTicks: 320, sourceTile: 'uranium_ore',  chops: true,  resultTile: 'rock',  decayAfter: 0,    color: '#60aa40', label: 'Mining uranium' },
-  // Era 6
-  decontaminate: { resource: null,       yield: 0, workTicks: 400, sourceTile: 'contamination',chops: true,  resultTile: 'rubble',decayAfter: 3000, color: '#80c070', label: 'Decontaminating' },
-  // Guard role (Era 3+, assigned by watchtower)
-  guard:         { resource: null,       yield: 0, workTicks: 0,   sourceTile: null,           chops: false, resultTile: null,    decayAfter: 0,    color: '#a06040', label: 'Patrolling' },
+// ── Resources ──────────────────────────────────────────────────────────────────
+// Deliberately tiny backend: just food and wood. Visible STATE is what matters, not
+// resource breadth. Storage capacity grows as storage parcels/granaries are built.
+export const BASE_STORAGE = { food: 40, wood: 40 }
+export const GRANARY_BONUS = 80      // each granary adds this much food capacity
+export const STOREYARD_BONUS = 60    // each store-yard adds this much wood capacity
+
+// Daily food consumption per citizen (charged once per in-sim day, evenly).
+export const FOOD_PER_CITIZEN_PER_DAY = 1.4
+
+// ── Households, migration & confidence ─────────────────────────────────────────
+// THE central anti-house-spam rule: a dwelling creates CAPACITY, never demand.
+// People arrive as migration waves only when the settlement is CONFIDENT (food in
+// store, a warm hearth, spare beds, recent calm). Weak confidence slows or reverses
+// migration. A hut sitting empty is normal and fine.
+export const HOUSEHOLD_SIZE_MIN = 2
+export const HOUSEHOLD_SIZE_MAX = 3
+
+export const MIGRATION_CHECK_TICKS = Math.round(2.5 * MIN)  // how often we consider a wave
+export const MIGRATION_CONFIDENCE  = 0.6    // confidence needed to invite a household
+export const DEPARTURE_CONFIDENCE  = 0.22   // below this, a household may drift away
+export const SETTLE_DELAY_TICKS    = Math.round(0.6 * MIN)  // newcomers linger before moving in
+
+// Confidence is a BLEND of separate signals (not one hidden stability score driving
+// everything). Weights here only shape migration & mood; the governor reads the raw
+// pressures directly, so no single number rules the AI.
+export const CONFIDENCE_WEIGHTS = {
+  food:    0.40,   // days of food in store, normalised
+  shelter: 0.25,   // spare bed headroom
+  warmth:  0.20,   // hearth firewood comfort
+  calm:    0.15,   // time since last disturbance
+}
+export const FOOD_CONFIDENCE_DAYS = 5   // food stock covering this many days = full marks
+
+// ── The governor (settlement AI) ───────────────────────────────────────────────
+// Acts SLOWLY and from SEPARATE pressures, not "stability > N → expand". One
+// considered decision every couple of minutes keeps growth gradual and legible.
+export const GOVERNOR_DECISION_TICKS = Math.round(2.0 * MIN)
+// Pressure thresholds above which the governor wants to act on a need.
+export const PRESSURE = {
+  food:    0.45,   // food per worker running thin → claim a field / forage ground
+  wood:    0.45,   // wood thin → claim a woodlot
+  // Shelter threshold sits just below the full-beds base (0.35) so any fully-occupied
+  // village with adequate food crosses it automatically. The real growth limiters are
+  // land availability (findParcelSite fails when crowded) and the food guard (>1.8 days).
+  // A decaying prosperity bonus used to gate this, but it kept converging to a near-miss
+  // just below whatever threshold we set — structural near-miss, not a tuning problem.
+  shelter: 0.34,
+  road:    0.55,   // a work parcel is far from the hearth → lay a path
 }
 
-// Keep JOBS for backward compat
-export const JOBS = {
-  farmer: { resource: 'food', yield: 3, workTicks: 200, color: '#a8d840', needsBuilding: 'farm' },
-  logger: { resource: 'wood', yield: 5, workTicks: 180, color: '#8a5820', needsBuilding: 'logging_camp' },
+// ── Land & parcels ─────────────────────────────────────────────────────────────
+// Settlements CLAIM land before they FILL it. Parcels are large lived-in spaces, not
+// one-tile buildings, so the early village is sparse, spacious and land-hungry.
+// `half` is the half-extent of the (2·half+1) square footprint. `spacing` is the
+// minimum gap (in tiles) the placement search keeps between this parcel and others —
+// this is what spreads the early settlement out.
+export const PARCEL_DEFS = {
+  hearth:   { half: 1, spacing: 0, clears: true,  jobs: 0, label: 'Hearth',          develop: 0 },
+  // A homestead: a cleared yard with a hut at its centre and room to breathe.
+  dwelling: { half: 1, spacing: 2, clears: true,  jobs: 0, label: 'Homestead',       develop: Math.round(50 * SEC), beds: 1 },
+  // A real field: a broad block of tilled rows worked by hand.
+  field:    { half: 2, spacing: 2, clears: true,  jobs: 2, label: 'Field',           develop: Math.round(70 * SEC) },
+  // Foraging ground: a wide patch of wild forest/meadow gleaned for food. Early-game
+  // food before fields exist; low yield, no clearing.
+  forage:   { half: 2, spacing: 2, clears: false, jobs: 1, label: 'Foraging Ground', develop: Math.round(20 * SEC) },
+  // Woodlot: a managed stand of trees, felled and regrown over time.
+  woodlot:  { half: 2, spacing: 1, clears: false, jobs: 2, label: 'Woodlot',         develop: Math.round(35 * SEC) },
+  // Store-yard: granary + woodpile near the hearth; raises storage and confidence.
+  storage:  { half: 1, spacing: 1, clears: true,  jobs: 0, label: 'Stores',          develop: Math.round(45 * SEC) },
+  // Village Common — a civic gathering space that appears in the Village band.
+  // Citizens occasionally visit to rest/socialise; purely visual/behavioural, no labour.
+  common:   { half: 1, spacing: 4, clears: true,  jobs: 0, label: 'Village Common',  develop: Math.round(60 * SEC) },
 }
 
-// ── Buildings ──────────────────────────────────────────────────────────────────
-export const BUILDING_DEFS = {
-  // ── Era 1: Tribal ──────────────────────────────────────────────────────────
-  town_center: {
-    cost: { wood: 50 }, buildTicks: 500, shelter: 0,
-    workerJob: null, maxWorkers: 0,
-    iso: { top: '#d4a84a', left: '#a07820', right: '#805808', h: 2.8 },
-    label: 'Town Center',
-  },
-  house: {
-    cost: { wood: 15 }, buildTicks: 300, shelter: 1,
-    workerJob: null, maxWorkers: 0,
-    iso: { top: '#d4845a', left: '#a05a30', right: '#8a4a20', h: 1.4 },
-    label: 'House',
-  },
-  farm: {
-    cost: { wood: 20 }, buildTicks: 300, shelter: 0,
-    workerJob: 'farmer', maxWorkers: 2,
-    iso: { top: '#6a9a3a', left: '#4a7a1a', right: '#3a6a0a', h: 0.4 },
-    label: 'Farm',
-  },
-  logging_camp: {
-    cost: { wood: 25 }, buildTicks: 250, shelter: 0,
-    workerJob: 'logger', maxWorkers: 2,
-    iso: { top: '#8a6030', left: '#5a3810', right: '#4a2808', h: 1.0 },
-    label: 'Logging Camp',
-  },
-  granary: {
-    cost: { wood: 30 }, buildTicks: 400, shelter: 0,
-    workerJob: null, maxWorkers: 0,
-    iso: { top: '#e8c040', left: '#b89010', right: '#987800', h: 1.8 },
-    label: 'Granary',
-  },
-  well: {
-    cost: { wood: 20 }, buildTicks: 150, shelter: 0,
-    workerJob: null, maxWorkers: 0,
-    iso: { top: '#9a9a8a', left: '#6a6a5a', right: '#5a5a4a', h: 0.6 },
-    label: 'Well',
-  },
+// ── Village / development band ─────────────────────────────────────────────────
+// The second development band ('village') unlocks after the settlement is stable,
+// well-fed, and large enough that maturing in place makes more sense than sprawling.
+export const VILLAGE_BAND_MIN_POP       = 70
+export const VILLAGE_BAND_MIN_DAY       = 30
+export const VILLAGE_BAND_MIN_FIELDS    = 3     // active field/forage/woodlot parcels
+export const VILLAGE_BAND_MIN_STORAGE   = 1     // active storage parcel
+export const VILLAGE_BAND_STABLE_TICKS  = Math.round(4 * MIN)  // must hold confidence ≥0.65 this long
+export const VILLAGE_BAND_CONFIDENCE    = 0.65
+// Max road upgrades the governor may commission in village mode (throttle).
+export const VILLAGE_ROAD_UPGRADE_BATCH = 6
 
-  // ── Era 2: Ancient ─────────────────────────────────────────────────────────
-  sawmill: {
-    cost: { wood: 18 }, buildTicks: 350, shelter: 0,
-    workerJob: null, maxWorkers: 0,
-    iso: { top: '#8a6838', left: '#5a4018', right: '#4a3008', h: 1.3 },
-    label: 'Sawmill',
-  },
-  stonemason: {
-    cost: { wood: 8, stone: 12 }, buildTicks: 420, shelter: 0,
-    workerJob: null, maxWorkers: 0,
-    iso: { top: '#8a8878', left: '#5a5848', right: '#4a4838', h: 1.5 },
-    label: 'Stonemason',
-  },
-  longhouse: {
-    cost: { planks: 20, cut_stone: 8 }, buildTicks: 600, shelter: 4,
-    workerJob: null, maxWorkers: 0,
-    iso: { top: '#c07040', left: '#904020', right: '#782010', h: 2.2 },
-    label: 'Longhouse',
-  },
-  market: {
-    cost: { planks: 12, cut_stone: 6 }, buildTicks: 450, shelter: 0,
-    workerJob: null, maxWorkers: 0,
-    iso: { top: '#d4c050', left: '#a09020', right: '#807000', h: 1.6 },
-    label: 'Market',
-  },
+// How far out the very first parcels may be placed, and the outward bias that keeps
+// the village growing into the forest rather than piling onto the hearth.
+export const CLAIM_MIN_RADIUS = 4
+export const CLAIM_MAX_RADIUS = 38   // ~4500 usable tiles → room for ~50 dwellings + fields → ~100 citizens
 
-  // ── Era 3: Medieval ────────────────────────────────────────────────────────
-  forge_building: {
-    cost: { cut_stone: 20, coal: 10 }, buildTicks: 500, shelter: 0,
-    workerJob: null, maxWorkers: 0,
-    iso: { top: '#805040', left: '#503020', right: '#402010', h: 1.8 },
-    label: 'Forge',
-  },
-  great_hall: {
-    cost: { iron: 10, planks: 30 }, buildTicks: 800, shelter: 8,
-    workerJob: null, maxWorkers: 0,
-    iso: { top: '#b08858', left: '#786028', right: '#604808', h: 3.0 },
-    label: 'Great Hall',
-  },
-  watchtower: {
-    cost: { cut_stone: 15, iron: 5 }, buildTicks: 500, shelter: 0,
-    workerJob: null, maxWorkers: 0,
-    iso: { top: '#909080', left: '#606050', right: '#505040', h: 3.5 },
-    label: 'Watchtower',
-  },
+// Woodlot regrowth: felled tiles become stumps, then regrow to forest, so a woodlot
+// is a renewable place rather than a patch that's stripped bare and abandoned.
+export const STUMP_REGROW_TICKS = Math.round(2.2 * MIN)
 
-  // ── Era 4: Industrial ──────────────────────────────────────────────────────
-  factory: {
-    cost: { iron: 25, cut_stone: 20 }, buildTicks: 600, shelter: 0,
-    workerJob: null, maxWorkers: 0,
-    iso: { top: '#707878', left: '#404848', right: '#303838', h: 2.5 },
-    label: 'Factory',
-  },
-  tenement: {
-    cost: { iron: 15, planks: 25 }, buildTicks: 500, shelter: 10,
-    workerJob: null, maxWorkers: 0,
-    iso: { top: '#a08870', left: '#705840', right: '#584830', h: 3.2 },
-    label: 'Tenement',
-  },
-  power_station: {
-    cost: { steel: 30, cut_stone: 25 }, buildTicks: 900, shelter: 0,
-    workerJob: null, maxWorkers: 0,
-    iso: { top: '#606880', left: '#303848', right: '#202838', h: 3.0 },
-    label: 'Power Station',
-  },
-
-  // ── Era 5: Nuclear ─────────────────────────────────────────────────────────
-  nuclear_plant: {
-    cost: { steel: 50, cut_stone: 40 }, buildTicks: 1400, shelter: 0,
-    workerJob: null, maxWorkers: 0,
-    iso: { top: '#708878', left: '#405848', right: '#303838', h: 4.0 },
-    label: 'Nuclear Plant',
-  },
-
-  // ── Stage 5: Stone Age buildings ──────────────────────────────────────────
-  mine: {
-    cost: { wood: 15, stone: 5 }, buildTicks: 350, shelter: 0,
-    workerJob: null, maxWorkers: 0,
-    iso: { top: '#5a5248', left: '#3a3228', right: '#2a2218', h: 1.2 },
-    label: 'Mine',
-  },
-  research_building: {
-    cost: { wood: 20, stone: 10 }, buildTicks: 400, shelter: 0,
-    workerJob: null, maxWorkers: 0,
-    iso: { top: '#6a7858', left: '#4a5838', right: '#3a4828', h: 1.6 },
-    label: 'Research Hall',
-  },
-  trophy: {
-    cost: {}, buildTicks: 1, shelter: 0,
-    workerJob: null, maxWorkers: 0,
-    iso: { top: '#d4b840', left: '#a08820', right: '#806800', h: 0.8 },
-    label: 'Victory Trophy',
-  },
-
-  // ── Era 6: Clean ───────────────────────────────────────────────────────────
-  solar_farm: {
-    cost: { steel: 20, cut_stone: 12 }, buildTicks: 400, shelter: 0,
-    workerJob: null, maxWorkers: 0,
-    iso: { top: '#4878a8', left: '#284858', right: '#183848', h: 0.5 },
-    label: 'Solar Farm',
-  },
-  decontam_center: {
-    cost: { steel: 12, cut_stone: 10 }, buildTicks: 350, shelter: 0,
-    workerJob: null, maxWorkers: 0,
-    iso: { top: '#70a870', left: '#408040', right: '#306030', h: 1.5 },
-    label: 'Decontam. Center',
-  },
-}
-
-// ── Unlock conditions ──────────────────────────────────────────────────────────
-export const UNLOCK_CONDITIONS = {
-  // Era 1
-  farm:            (w) => w.citizens.length >= 5 || w.deficits.food >= 20,
-  logging_camp:    (w) => w.citizens.filter(c => c.task === 'chop').length >= 2,
-  granary:         (w) => w.citizens.length >= 8,
-  well:            (w) => w.citizens.length >= 10,
-  // Era 2
-  sawmill:         (w) => w.citizens.length >= 6  && w.resources.wood  >= 30,
-  stonemason:      (w) => w.citizens.length >= 6  && w.resources.stone >= 15,
-  longhouse:       (w) => w.era >= 2,
-  market:          (w) => w.era >= 2 && w.buildings.some(b => b.type === 'longhouse' && b.isBuilt),
-  // Era 3
-  forge_building:  (w) => w.era >= 2 && w.resources.coal >= 5,
-  great_hall:      (w) => w.era >= 3,
-  watchtower:      (w) => w.era >= 3 && w.resources.iron >= 5,
-  // Era 4
-  factory:         (w) => w.era >= 3 && w.resources.iron >= 20,
-  tenement:        (w) => w.era >= 4,
-  power_station:   (w) => w.era >= 4 && w.resources.steel >= 10,
-  // Era 5
-  nuclear_plant:   (w) => w.era >= 4 && w.resources.steel >= 30,
-  // Stage 5 buildings
-  mine:              (w) => w.stage >= 5,
-  research_building: (w) => w.mineDiscovery === true,
-  // Era 6
-  solar_farm:      (w) => w.era >= 6,
-  decontam_center: (w) => w.nuclearRevealed,
-}
-
-// ── Resource consumption ───────────────────────────────────────────────────────
-export const FOOD_PER_CITIZEN   = 1
-export const FOOD_CONSUME_EVERY = 400
-
-// ── Arrivals ──────────────────────────────────────────────────────────────────
-export const ARRIVE_MIN_TICKS = 1_200
-export const ARRIVE_MAX_TICKS = 18_000
-
-// ── Tile types ─────────────────────────────────────────────────────────────────
+// ── Tile palette ───────────────────────────────────────────────────────────────
+// Terrain communicates state by itself (no UI). Cleared ground, tilled fields,
+// stumps and paths are all readable at a glance.
 export const GROUND = {
-  grass:                 '#3a5c28',
-  forest:                '#1a3810',
-  stump:                 '#5a4828',
-  path:                  '#8a7a60',
-  plaza:                 '#9a8a70',
-  farmland:              '#7a5530',
-  water:                 '#2a5880',
-  bridge:                '#9a8a68',
-  rock:                  '#7a7870',
-  nuclear_ruin:          '#4a4840',
-  nuclear_ruin_revealed: '#2e2c2a',
-  rubble:                '#4e4438',
-  tombstone:             '#3a3830',
-  coal_seam:             '#28282a',
-  iron_deposit:          '#8a5040',
-  uranium_ore:           '#506840',
-  contamination:         '#5a6830',
-  // Legacy markers — permanent monuments awarded for rare world events
-  legacy_arc:            '#1c3020',
-  legacy_pyre:           '#1a1010',
-  legacy_guard:          '#20203a',
-  legacy_elder:          '#4a3818',
-  legacy_famine:         '#28202e',
-  legacy_resilience:     '#2c2c2c',
+  grass:    '#3f6130',
+  meadow:   '#4c6f33',   // lighter wild grass, used inside foraging grounds
+  forest:   '#1d3a14',
+  cleared:  '#6b5a3c',   // bare claimed earth
+  field:    '#7a5530',   // tilled soil
+  stump:    '#5a4828',
+  path:     '#9a865f',
+  road:     '#c4a87a',   // upgraded road — wider, lighter, more finished-looking
+  water:    '#2a5880',
+  rock:     '#6a6858',
+  hearth:   '#5a4632',
+  common:   '#8a7a58',   // village common — compacted earth
 }
 
-export const STUMP_DECAY_TICKS     = 600
-export const REVEAL_RADIUS         = 10
+// ── Reveal ─────────────────────────────────────────────────────────────────────
+// The world is hidden until the settlement reaches toward it. Reveal grows as
+// parcels are claimed and citizens travel.
+export const INITIAL_REVEAL  = 9    // tiles revealed around the hearth at world birth
+export const PARCEL_REVEAL    = 3    // extra reveal halo around each claimed parcel
+export const CITIZEN_REVEAL   = 2    // small halo a moving citizen uncovers
 
-// ── Season system ──────────────────────────────────────────────────────────────
-export const SEASON_LENGTH = 72000   // ticks per season (3 min at 20× dev speed; 1 hr at 1×)
-export const SEASONS       = ['spring', 'summer', 'fall', 'winter']
-
-// ── Tree chopping + log system ─────────────────────────────────────────────────
-export const LOG_COUNT_PER_TREE    = 12   // logs scattered when a tree is felled (4 trips)
-export const LOG_CARRY_COUNT       = 3    // logs a citizen can carry per trip
-export const CHOP_TICKS_PER_CYCLE  = 30   // ticks per chop animation cycle (9 cycles total)
-
-// ── Fire crisis ────────────────────────────────────────────────────────────────
-export const FIRE_CRISIS_THRESHOLD = 0.15  // fuelTank fraction below which crisis begins
-export const FIRE_CRISIS_RECOVER   = 0.25  // fuelTank fraction at which crisis clears
-
-// ── Day / Night cycle ──────────────────────────────────────────────────────────
-// Time scale (at 1× speed, 20 ticks/sec):
-//   1 day   = 200 ticks = 10 sec real
-//   1 night = 200 ticks = 10 sec real
-//   1 week  = 7 cycles  = ~2.3 min
-//   1 month = 4 weeks   = ~9.3 min
-//   1 season= 2 months  = ~18.6 min
-export const DAY_TICKS   = 200
-export const NIGHT_TICKS = 200
-export const CYCLE_TICKS = DAY_TICKS + NIGHT_TICKS
-export const DUSK_TICKS  = 40
-export const DAWN_TICKS  = 40
+// ── Starting settlement ────────────────────────────────────────────────────────
+// Almost too sparse on purpose: a hearth, ONE hut, a few founders, and a single
+// foraging ground. The map reveals itself as they expand.
+export const START_FOUNDERS = 3
