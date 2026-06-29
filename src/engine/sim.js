@@ -7,12 +7,14 @@ import {
   GOVERNOR_DECISION_TICKS, MIGRATION_CHECK_TICKS, CYCLE_TICKS,
   VILLAGE_BAND_MIN_POP, VILLAGE_BAND_MIN_DAY, VILLAGE_BAND_MIN_FIELDS,
   VILLAGE_BAND_MIN_STORAGE, VILLAGE_BAND_STABLE_TICKS, VILLAGE_BAND_CONFIDENCE,
+  TRAFFIC_DECAY_RATE, TRAFFIC_DECAY_TICKS, TRAFFIC_TO_TRAIL,
 } from './config.js'
 import { updateCitizens } from './citizens.js'
 import { regrowStumps } from './parcels.js'
 import { tickUpkeep, recomputeConfidence, recomputePressures } from './economy.js'
 import { considerMigration, considerDeparture, updateMigrants } from './population.js'
 import { governorDecide } from './governor.js'
+import { setTile } from './world.js'
 import { key } from './terrain.js'
 
 export function tick(world) {
@@ -50,8 +52,37 @@ export function tick(world) {
   // ── Autosave signal (set flag; actual save called from App.jsx) ───────────────
   if (world.tick % 600 === 0) world._autosaveDue = true
 
+  // ── Traffic decay: footfall fades over time so paths worn out of use disappear ─
+  if (world.tick % TRAFFIC_DECAY_TICKS === 0) decayTraffic(world)
+
+  // ── Desire paths: heavily-walked grass/cleared tiles spontaneously become trails
+  if (world.tick % 500 === 0) createDesirePaths(world)
+
   // ── Bound memory for week/month-long runs: drop far, unrevealed, plain tiles ──
   if (world.tick % 2000 === 0) pruneTiles(world)
+}
+
+// ── Traffic decay ─────────────────────────────────────────────────────────────
+function decayTraffic(world) {
+  for (const t of world.tiles.values()) {
+    if (t.traffic) t.traffic = Math.floor(t.traffic * TRAFFIC_DECAY_RATE)
+  }
+}
+
+// ── Desire paths ──────────────────────────────────────────────────────────────
+// Grass or cleared ground walked on heavily enough spontaneously becomes a trail.
+// This happens organically between parcels, not just where the governor lays paths.
+const DESIRE_ELIGIBLE = new Set(['grass', 'cleared', 'meadow'])
+function createDesirePaths(world) {
+  let created = 0
+  for (const [k, t] of world.tiles) {
+    if (!DESIRE_ELIGIBLE.has(t.type)) continue
+    if (!t.traffic || t.traffic < TRAFFIC_TO_TRAIL) continue
+    const i = k.indexOf(',')
+    setTile(world, +k.slice(0, i), +k.slice(i + 1), 'trail')
+    world.bgDirty = true
+    if (++created >= 3) break
+  }
 }
 
 // ── Village band transition ───────────────────────────────────────────────────

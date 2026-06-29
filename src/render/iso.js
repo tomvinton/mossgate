@@ -40,6 +40,7 @@ export function drawTile(ctx, sx, sy, type) {
     case 'field':   return drawField(ctx, sx, sy)
     case 'meadow':  return drawMeadow(ctx, sx, sy)
     case 'cleared': return drawCleared(ctx, sx, sy)
+    case 'trail':   return drawTrail(ctx, sx, sy)
     case 'path':    return drawPath(ctx, sx, sy)
     case 'road':    return drawRoad(ctx, sx, sy)
     case 'common':  return drawCommon(ctx, sx, sy)
@@ -82,6 +83,15 @@ function drawField(ctx, sx, sy) {
     ctx.beginPath(); ctx.moveTo(sx - TW2 - 4, sy + i); ctx.lineTo(sx + TW2 + 4, sy + i); ctx.stroke()
   }
   ctx.restore()
+}
+
+function drawTrail(ctx, sx, sy) {
+  // A faint desire path — barely wider than a footstep. Shows footfall before the
+  // governor commits to a real path; subtler than path, lighter than cleared ground.
+  diamond(ctx, sx, sy, GROUND.trail, 'rgba(0,0,0,0.10)')
+  ctx.fillStyle = 'rgba(0,0,0,0.07)'
+  for (const [ox, oy] of [[-3, TH2 + 1], [3, TH2 - 2]])
+    ctx.beginPath(), ctx.ellipse(sx + ox, sy + oy, 1.6, 0.8, 0, 0, Math.PI * 2), ctx.fill()
 }
 
 function drawPath(ctx, sx, sy) {

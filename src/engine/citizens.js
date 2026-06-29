@@ -7,12 +7,12 @@
 // of the scene.
 
 import {
-  WALK_SPEED, PATH_SPEED_MULT, ARRIVE_EPS, WORK_CYCLE, CARRY_CAPACITY,
+  WALK_SPEED, PATH_SPEED_MULT, ROAD_SPEED_MULT, ARRIVE_EPS, WORK_CYCLE, CARRY_CAPACITY,
   DEPOSIT_TICKS, TRIPS_BEFORE_REST, REST_TICKS_MIN, REST_TICKS_MAX,
   IDLE_WANDER_CHANCE, CITIZEN_REVEAL,
 } from './config.js'
 import { dropPoint, tileType, dist, buildingById, parcelById } from './world.js'
-import { revealAround } from './terrain.js'
+import { revealAround, key } from './terrain.js'
 import { isNight, seasonYield } from './time.js'
 import { addResource } from './economy.js'
 import {
@@ -56,8 +56,10 @@ export function makeCitizen(world, x, y) {
 function moveToward(world, c, tx, ty, nightSlow) {
   const d = dist(c.x, c.y, tx, ty)
   if (d < ARRIVE_EPS) { c.x = tx; c.y = ty; return true }
-  const onPath = tileType(world, Math.round(c.x), Math.round(c.y)) === 'path'
-  let speed = WALK_SPEED * (onPath ? PATH_SPEED_MULT : 1)
+  const onType = tileType(world, Math.round(c.x), Math.round(c.y))
+  let speed = onType === 'road'  ? WALK_SPEED * ROAD_SPEED_MULT
+            : onType === 'path' || onType === 'trail' ? WALK_SPEED * PATH_SPEED_MULT
+            : WALK_SPEED
   if (nightSlow) speed *= 0.7              // people dawdle home in the dark
   c.x += (tx - c.x) / d * speed
   c.y += (ty - c.y) / d * speed
@@ -78,6 +80,15 @@ export function updateCitizens(world) {
   // Citizens uncover the world as they move through it — exploration reveals the map.
   if (world.tick % 12 === 0) {
     for (const c of world.citizens) revealAround(world, Math.round(c.x), Math.round(c.y), CITIZEN_REVEAL)
+  }
+
+  // Footfall tracking: tiles accumulate traffic from citizens passing through them.
+  // High-traffic grass/cleared tiles will spontaneously become trails (see sim.js).
+  if (world.tick % 8 === 0) {
+    for (const c of world.citizens) {
+      const t = world.tiles.get(key(Math.round(c.x), Math.round(c.y)))
+      if (t) t.traffic = (t.traffic || 0) + 1
+    }
   }
 }
 

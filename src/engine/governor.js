@@ -15,7 +15,10 @@
 // leaving the world frozen. It slowly extends paths, clears ground, and scouts ahead —
 // keeping the settlement visibly alive even during a long population plateau.
 
-import { PRESSURE, PARCEL_DEFS, GOVERNOR_DECISION_TICKS, VILLAGE_ROAD_UPGRADE_BATCH, CLAIM_MAX_RADIUS } from './config.js'
+import {
+  PRESSURE, PARCEL_DEFS, GOVERNOR_DECISION_TICKS, VILLAGE_ROAD_UPGRADE_BATCH,
+  CLAIM_MAX_RADIUS, TRAFFIC_TRAIL_UPGRADE, TRAFFIC_PATH_UPGRADE,
+} from './config.js'
 import { claimParcel, findParcelSite, developingParcels } from './parcels.js'
 import { addEvent, setTile, tileType, dist } from './world.js'
 import { revealAround, unkey } from './terrain.js'
@@ -57,8 +60,9 @@ function layPath(world, target) {
 
 // L-shaped orthogonal route: col-axis first, then row-axis.
 // Produces clean 90° elbows instead of diagonals.
+// Only writes 'path' on tiles that aren't already a path/trail/road — don't downgrade.
 function layOrthogonalPath(world, c0, r0, c1, r1) {
-  const SKIP = new Set(['water', 'hearth', 'field'])
+  const SKIP = new Set(['water', 'hearth', 'field', 'path', 'trail', 'road'])
   let c = c0, r = r0
   const dc = Math.sign(c1 - c0)
   const dr = Math.sign(r1 - r0)
@@ -195,6 +199,77 @@ function maybeLayRoad(world) {
   if (t) { layPath(world, t); t.hasPath = true; addEvent(world, 'A path now runs out to the far work.') }
 }
 
+// ── Parcel connection ─────────────────────────────────────────────────────────
+// Every active/developing parcel should have a visible path, trail or road within
+// arm's reach. The governor checks for disconnected parcels first in its peaceful
+// project loop — connectivity is the highest-priority maintenance task.
+
+function isParcelConnected(world, parcel) {
+  const reach = parcel.half + 2
+  for (let dc = -reach; dc <= reach; dc++) {
+    for (let dr = -reach; dr <= reach; dr++) {
+      const ty = tileType(world, parcel.col + dc, parcel.row + dr)
+      if (ty === 'path' || ty === 'road' || ty === 'trail') return true
+    }
+  }
+  return false
+}
+
+function tryConnectParcel(world) {
+  for (const p of world.parcels) {
+    if (p.type === 'hearth') continue
+    if (p.state !== 'active' && p.state !== 'developing') continue
+    if (isParcelConnected(world, p)) { p.connected = true; continue }
+    p.connected = false
+
+    // Branch from the nearest existing network tile so we grow the network rather
+    // than always drawing from the hearth.
+    let sc = world.hearth.col, sr = world.hearth.row
+    let bestD = dist(p.col, p.row, sc, sr)
+    for (const [k, t] of world.tiles) {
+      if (t.type !== 'path' && t.type !== 'road' && t.type !== 'trail') continue
+      const [c, r] = unkey(k)
+      const d = dist(p.col, p.row, c, r)
+      if (d < bestD) { bestD = d; sc = c; sr = r }
+    }
+
+    layOrthogonalPath(world, sc, sr, p.col, p.row)
+    p.connected = true
+    world.bgDirty = true
+    world.governor.lastAction = `connecting ${p.name || p.type} to the road network`
+    world.governor.lastVisibleProjectTick = world.tick
+    addEvent(world, `A path now reaches ${p.name || 'an outlying ' + p.type}.`)
+    return true
+  }
+  return false
+}
+
+// ── Traffic-based road upgrade ────────────────────────────────────────────────
+// Trails worn heavily by citizens get paved to paths; busy paths become roads.
+// The governor picks the single most-trafficked eligible tile each cycle.
+
+function tryUpgradeByTraffic(world) {
+  let bestKey = null, bestTraffic = 0, bestType = null
+  for (const [k, t] of world.tiles) {
+    if (!t.traffic) continue
+    if (t.type === 'trail' && t.traffic >= TRAFFIC_TRAIL_UPGRADE && t.traffic > bestTraffic) {
+      bestKey = k; bestTraffic = t.traffic; bestType = 'trail'
+    } else if (t.type === 'path' && t.traffic >= TRAFFIC_PATH_UPGRADE && t.traffic > bestTraffic) {
+      bestKey = k; bestTraffic = t.traffic; bestType = 'path'
+    }
+  }
+  if (!bestKey) return false
+
+  const [c, r] = unkey(bestKey)
+  const newType = bestType === 'trail' ? 'path' : 'road'
+  setTile(world, c, r, newType)
+  world.bgDirty = true
+  world.governor.lastAction = `paving a busy ${bestType} to ${newType}`
+  world.governor.lastVisibleProjectTick = world.tick
+  addEvent(world, `A well-worn ${bestType} has been improved to a ${newType}.`)
+  return true
+}
+
 // ── Village-band peaceful projects ────────────────────────────────────────────
 // After the settlement band transitions to 'village', the governor gains two
 // additional peaceful options: building a village common and upgrading paths.
@@ -253,12 +328,24 @@ function choosePeacefulProject(world) {
   const gov = world.governor
   const currentDecision = Math.floor(world.tick / GOVERNOR_DECISION_TICKS)
   const decisionsSinceLast = currentDecision - (gov.lastPeacefulDecision || 0)
+
+  // 1. Connect any parcel lacking road access — always fires immediately, no cooldown.
+  if (tryConnectParcel(world)) {
+    gov.lastPeacefulDecision = currentDecision
+    return true
+  }
+
   if (decisionsSinceLast < PEACEFUL_MIN_DECISIONS) return false
 
-  // Village-band exclusive projects.
+  // 2. Upgrade a heavily-trafficked tile (trail→path, path→road).
+  if (tryUpgradeByTraffic(world)) {
+    gov.lastPeacefulDecision = currentDecision
+    return true
+  }
+
+  // 3. Village-band exclusive projects.
   if (world.band === 'village') {
     if (!hasCommon(world) && tryBuildCommon(world)) { gov.lastPeacefulDecision = currentDecision; return true }
-    // Road upgrades every few decisions.
     const roadDecisions = currentDecision - (gov.lastRoadUpgradeDecision || 0)
     if (roadDecisions >= 3 && tryUpgradeRoads(world)) {
       gov.lastRoadUpgradeDecision = currentDecision
@@ -267,13 +354,13 @@ function choosePeacefulProject(world) {
     }
   }
 
-  // Path extension is the most visible act — try it first every cycle.
+  // 4. Extend the frontier path into unexplored forest.
   if (tryExtendExploratoryPath(world)) {
     gov.lastPeacefulDecision = currentDecision
     return true
   }
 
-  // Clearing is reliable but repetitive — only allow it every CLEAR_MIN_DECISIONS.
+  // 5. Clear ground near the network (throttled — repetitive but reliable).
   const clearDecisionsSinceLast = currentDecision - (gov.lastClearDecision || 0)
   if (clearDecisionsSinceLast >= CLEAR_MIN_DECISIONS && tryClearNearPath(world)) {
     gov.lastClearDecision = currentDecision
@@ -281,7 +368,7 @@ function choosePeacefulProject(world) {
     return true
   }
 
-  // Scout fills the gap when path extension fails and clearing is on cooldown.
+  // 6. Scout ahead — quiet, no visible change, keeps the map growing.
   tryLocalScout(world)
   gov.lastPeacefulDecision = currentDecision
   return true
@@ -318,9 +405,12 @@ function tryExtendExploratoryPath(world) {
     row = Math.round(row + dr)
     const ty = tileType(world, col, row)
     if (ty === 'water' || ty === 'hearth' || ty === 'field') break
-    setTile(world, col, row, 'path')
+    // Only count truly new tiles — don't claim a visible project for re-tracing existing paths.
+    if (ty !== 'path' && ty !== 'road' && ty !== 'trail') {
+      setTile(world, col, row, 'path')
+      laid++
+    }
     revealAround(world, col, row, 2)
-    laid++
   }
   if (laid === 0) return false
 

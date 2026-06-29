@@ -14,7 +14,7 @@ import { saveWorld, loadSave, restoreWorld, clearSave } from './engine/persist.j
 import { dist } from './engine/world.js'
 
 const SPEEDS = [1, 3, 10, 30, 100]
-const VERSION = '0.2.1'
+const VERSION = '0.2.2'
 const BUILD_TIME = new Date(__BUILD_TIME__).toLocaleString('en-GB', {
   day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit', hour12: false,
 })
@@ -365,6 +365,17 @@ export default function App() {
         const fDays        = foodDays(world)
         const daysSinceP   = ((world.tick - (gov.lastVisibleProjectTick || 0)) / CYCLE_TICKS).toFixed(1)
 
+        // Road / trail counts and parcel connectivity
+        let trailCount = 0, pathCount = 0, roadCount = 0
+        for (const t of world.tiles.values()) {
+          if (t.type === 'trail') trailCount++
+          else if (t.type === 'path') pathCount++
+          else if (t.type === 'road') roadCount++
+        }
+        const connectableParcels = world.parcels.filter(p =>
+          p.type !== 'hearth' && (p.state === 'active' || p.state === 'developing'))
+        const connectedCount = connectableParcels.filter(p => p.connected !== false).length
+
         // Band eligibility
         const workCount    = world.parcels.filter(q =>
           q.state === 'active' && ['field','forage','woodlot'].includes(q.type)).length
@@ -415,6 +426,10 @@ export default function App() {
           `action: ${gov.lastAction}`,
           `days since visible project: ${daysSinceP}`,
           `parcels  ${Object.entries(counts).map(([t, n]) => `${t}:${n}`).join('  ')}`,
+          ``,
+          `── Roads & Paths ────────────────────`,
+          `trails ${trailCount}  paths ${pathCount}  roads ${roadCount}`,
+          `connected: ${connectedCount}/${connectableParcels.length} parcels`,
           ``,
           `── Development Band ─────────────────`,
           `band: ${world.band}${world.band === 'settlement' ? '' : ' ✦'}`,

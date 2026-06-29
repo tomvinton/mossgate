@@ -185,13 +185,26 @@ export const GROUND = {
   cleared:  '#6b5a3c',   // bare claimed earth
   field:    '#7a5530',   // tilled soil
   stump:    '#5a4828',
-  path:     '#9a865f',
+  trail:    '#937e5a',   // faint desire path worn by footfall
+  path:     '#a88e64',   // established dirt path
   road:     '#c4a87a',   // upgraded road — wider, lighter, more finished-looking
   water:    '#2a5880',
   rock:     '#6a6858',
   hearth:   '#5a4632',
   common:   '#8a7a58',   // village common — compacted earth
 }
+
+// ── Traffic & organic road growth ─────────────────────────────────────────────
+// Citizens leave footfall on tiles as they walk. High-traffic tiles spontaneously
+// become trails, and the governor upgrades heavily-used trails/paths over time.
+export const TRAFFIC_TO_TRAIL      = 80    // cumulative footfall to auto-create a trail
+export const TRAFFIC_TRAIL_UPGRADE = 300   // governor upgrades trail → path at this level
+export const TRAFFIC_PATH_UPGRADE  = 1200  // governor upgrades path  → road at this level
+export const TRAFFIC_DECAY_RATE    = 0.93  // multiply all traffic by this on each decay pass
+export const TRAFFIC_DECAY_TICKS   = 2000  // ticks between decay passes (~100s at 1×)
+
+// Road speed — road tiles are faster than paths, incentivising the network.
+export const ROAD_SPEED_MULT = 2.4   // on road tile (vs PATH_SPEED_MULT 1.8 on path/trail)
 
 // ── Reveal ─────────────────────────────────────────────────────────────────────
 // The world is hidden until the settlement reaches toward it. Reveal grows as
