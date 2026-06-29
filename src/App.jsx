@@ -14,6 +14,7 @@ import { saveWorld, loadSave, restoreWorld, clearSave } from './engine/persist.j
 import { dist } from './engine/world.js'
 
 const SPEEDS = [1, 3, 10, 30, 100]
+const VERSION = '0.2.0'
 const TW2 = TILE_W / 2
 const TH2 = TILE_H / 2
 
@@ -145,6 +146,7 @@ export default function App() {
   const speedAccRef     = useRef(0)
   const vignetteRef     = useRef(null)
   const saveStatusRef   = useRef('ok')     // 'ok' | 'saving' | 'failed'
+  const cornerTapRef    = useRef({ count: 0, last: 0 })
 
   const [speed,     setSpeed]     = useState(1)
   const [debug,     setDebug]     = useState(false)
@@ -388,7 +390,7 @@ export default function App() {
         const sortRebuildAge = ((now2 - sortTimeRef.current) / 1000).toFixed(1)
 
         debugRef.current.textContent = [
-          `${clockLabel(world)}   day ${dayN}   speed ${speedRef.current}×`,
+          `MossGate v${VERSION}   ${clockLabel(world)}   day ${dayN}   speed ${speedRef.current}×`,
           ``,
           `── Population ───────────────────────`,
           `citizens ${world.citizens.length}   households ${world.households.length}   migrants ${world.migrants.length}`,
@@ -451,12 +453,27 @@ export default function App() {
         const dx = Math.abs(e.clientX - pointerDownAt.x)
         const dy = Math.abs(e.clientY - pointerDownAt.y)
         if (dx < 5 && dy < 5) {
-          const dpr = dprRef.current
-          const W   = canvas.width / dpr
-          const H   = canvas.height / dpr
-          const hit = hitTestClick(worldRef.current, cameraRef.current, e.clientX, e.clientY, W, H)
-          selectedRef.current = hit
-          setSelected(hit)
+          // 5 taps in the top-right corner toggles the debug overlay.
+          const W = canvas.width / dprRef.current
+          const H = canvas.height / dprRef.current
+          const inCorner = e.clientX > W * 0.78 && e.clientY < H * 0.18
+          if (inCorner) {
+            const ct = cornerTapRef.current
+            const now = Date.now()
+            ct.count = now - ct.last < 800 ? ct.count + 1 : 1
+            ct.last  = now
+            if (ct.count >= 5) {
+              ct.count = 0
+              setDebug(v => {
+                debugRef.current && (debugRef.current.style.display = v ? 'none' : 'block')
+                return !v
+              })
+            }
+          } else {
+            const hit = hitTestClick(worldRef.current, cameraRef.current, e.clientX, e.clientY, W, H)
+            selectedRef.current = hit
+            setSelected(hit)
+          }
         }
         pointerDownAt = null
       }
@@ -527,7 +544,7 @@ export default function App() {
             }}>{s}×</button>
           ))}
           <span style={{ font: '10px monospace', color: '#567', alignSelf: 'center', marginLeft: 8 }}>
-            D debug · N new world · S save · 1–5 speed · drag to pan · click to inspect
+            D debug · N new world · S save · 1–5 speed · drag to pan · click to inspect · tap corner ×5
           </span>
         </div>
       )}
