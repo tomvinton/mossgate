@@ -95,10 +95,36 @@ export function findParcelSite(world, type) {
       // open ground; everything prefers being closer in (shorter walks).
       const ff = forestFraction(world, tiles)
       let suit = 0
-      if (type === 'woodlot')      suit = ff               // more trees = better
-      else if (type === 'forage')  suit = 0.5 + ff * 0.5   // wild, some trees
-      else                         suit = 1 - ff           // open ground for fields/homes
-      const score = suit * 2 - radius * 0.08               // closer rings win ties
+      if (type === 'woodlot' || type === 'grove') {
+        suit = ff                          // more trees = better
+      } else if (type === 'forage') {
+        suit = 0.5 + ff * 0.5             // wild, some trees
+      } else {
+        suit = 1 - ff                     // open ground for fields/homes
+      }
+
+      // Dwellings near an existing road/path/trail are preferred — road frontage.
+      let bonus = 0
+      if (type === 'dwelling') {
+        const reach = def.half + 2
+        outer: for (let dc = -reach; dc <= reach; dc++) {
+          for (let dr = -reach; dr <= reach; dr++) {
+            const ty = tileType(world, col + dc, row + dr)
+            if (ty === 'path' || ty === 'road' || ty === 'trail') { bonus += 0.35; break outer }
+          }
+        }
+      }
+
+      // Fields cluster near other fields — creates an agricultural zone.
+      if (type === 'field') {
+        for (const p2 of world.parcels) {
+          if (p2.type !== 'field') continue
+          const d = Math.hypot(col - p2.col, row - p2.row)
+          if (d < 14 && d > 2) { bonus += 0.25; break }
+        }
+      }
+
+      const score = suit * 2 - radius * 0.08 + bonus
 
       if (score > bestScore) { bestScore = score; best = { col, row, tiles } }
     }
@@ -214,6 +240,9 @@ function finalizeParcel(world, parcel) {
     setTile(world, parcel.col, parcel.row, 'hearth')
   } else if (parcel.type === 'common') {
     for (const t of parcel.tiles) setTile(world, t.col, t.row, 'common')
+  } else if (parcel.type === 'grove') {
+    // A protected grove — tiles stay as-is. The parcel claim itself is the protection;
+    // clearing logic skips claimed tiles so this forest will not be bulldozed.
   }
 
   addEvent(world, `The ${def.label.toLowerCase()} is ready.`)

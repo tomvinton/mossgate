@@ -152,6 +152,9 @@ export const PARCEL_DEFS = {
   // Village Common — a civic gathering space that appears in the Village band.
   // Citizens occasionally visit to rest/socialise; purely visual/behavioural, no labour.
   common:   { half: 1, spacing: 4, clears: true,  jobs: 0, label: 'Village Common',  develop: Math.round(60 * SEC) },
+  // Protected grove — the governor claims a stand of trees to prevent them being cleared.
+  // The claim itself is the protection; tiles stay as-is (forest remains forest).
+  grove:    { half: 2, spacing: 5, clears: false, jobs: 0, label: 'Grove',            develop: 0 },
 }
 
 // ── Village / development band ─────────────────────────────────────────────────
@@ -185,6 +188,7 @@ export const GROUND = {
   cleared:  '#6b5a3c',   // bare claimed earth
   field:    '#7a5530',   // tilled soil
   stump:    '#5a4828',
+  grove:    '#1e4815',   // protected forest stand — slightly brighter than raw forest
   trail:    '#937e5a',   // faint desire path worn by footfall
   path:     '#a88e64',   // established dirt path
   road:     '#c4a87a',   // upgraded road — wider, lighter, more finished-looking
@@ -193,6 +197,13 @@ export const GROUND = {
   hearth:   '#5a4632',
   common:   '#8a7a58',   // village common — compacted earth
 }
+
+// ── Forest stewardship ────────────────────────────────────────────────────────
+// The settlement tracks tree coverage across revealed land. When it drops below
+// the minimum, clearing is suspended and the governor plants protective groves.
+// Unclaimed cleared tiles slowly regrow so barren wasteland can't accumulate.
+export const FOREST_COVERAGE_MIN   = 0.18   // clearing blocked below this ratio
+export const FOREST_COVERAGE_GROVE = 0.26   // governor plants a grove below this ratio
 
 // ── Traffic & organic road growth ─────────────────────────────────────────────
 // Citizens leave footfall on tiles as they walk. High-traffic tiles spontaneously

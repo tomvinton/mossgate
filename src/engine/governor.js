@@ -18,6 +18,7 @@
 import {
   PRESSURE, PARCEL_DEFS, GOVERNOR_DECISION_TICKS, VILLAGE_ROAD_UPGRADE_BATCH,
   CLAIM_MAX_RADIUS, TRAFFIC_TRAIL_UPGRADE, TRAFFIC_PATH_UPGRADE,
+  FOREST_COVERAGE_MIN, FOREST_COVERAGE_GROVE,
 } from './config.js'
 import { claimParcel, findParcelSite, developingParcels } from './parcels.js'
 import { addEvent, setTile, tileType, dist } from './world.js'
@@ -354,13 +355,25 @@ function choosePeacefulProject(world) {
     }
   }
 
-  // 4. Extend the frontier path into unexplored forest.
+  // 4. Plant a grove if forest coverage is getting low (stewardship over expansion).
+  if ((world.forestCoverage ?? 1) < FOREST_COVERAGE_GROVE && tryPlantGrove(world)) {
+    gov.lastPeacefulDecision = currentDecision
+    return true
+  }
+
+  // 5. Extend the frontier path into unexplored forest.
   if (tryExtendExploratoryPath(world)) {
     gov.lastPeacefulDecision = currentDecision
     return true
   }
 
-  // 5. Clear ground near the network (throttled — repetitive but reliable).
+  // 6. Village-band: plant groves as a beautification act even when coverage is fine.
+  if (world.band === 'village' && tryPlantGrove(world)) {
+    gov.lastPeacefulDecision = currentDecision
+    return true
+  }
+
+  // 7. Clear ground (zone-restricted + coverage-gated — throttled, reliable fallback).
   const clearDecisionsSinceLast = currentDecision - (gov.lastClearDecision || 0)
   if (clearDecisionsSinceLast >= CLEAR_MIN_DECISIONS && tryClearNearPath(world)) {
     gov.lastClearDecision = currentDecision
@@ -368,7 +381,7 @@ function choosePeacefulProject(world) {
     return true
   }
 
-  // 6. Scout ahead — quiet, no visible change, keeps the map growing.
+  // 8. Scout ahead — quiet, no visible change, keeps the map growing.
   tryLocalScout(world)
   gov.lastPeacefulDecision = currentDecision
   return true
@@ -422,58 +435,59 @@ function tryExtendExploratoryPath(world) {
   return true
 }
 
-// Clear a small patch of unclaimed forest/grass within the already-revealed area.
-// Starts path-adjacent (most visible), then falls back to anywhere revealed.
-// This keeps working even after paths are fully cleared — as long as there is any
-// revealed uncleared land between parcels, something happens.
+// Clear a small patch within the SETTLED ZONE only — the area immediately around
+// existing parcels. Never clears along exploratory paths into the forest, which was
+// the cause of the barren-wasteland problem. Also blocked when forest coverage is low.
 function tryClearNearPath(world) {
-  const CLEARABLE = new Set(['forest', 'grass', 'meadow'])
-  const dirs = [[1,0],[-1,0],[0,1],[0,-1],[1,1],[-1,1],[1,-1],[-1,-1]]
+  if ((world.forestCoverage ?? 1) < FOREST_COVERAGE_MIN) return false
 
-  // Build a set of tiles claimed by any parcel (don't clear managed land).
+  const CLEARABLE = new Set(['forest', 'grass', 'meadow'])
   const claimedKeys = new Set()
   for (const p of world.parcels)
     for (const t of p.tiles) claimedKeys.add(`${t.col},${t.row}`)
 
+  // Only clear within the settled zone: tiles within a parcel's half+3 reach.
+  // This restricts clearing to actual settlement footprint, not the entire forest.
   let cleared = 0
-
-  // Pass 1: prefer tiles adjacent to an existing path.
-  for (const [k, t] of world.tiles) {
-    if (t.type !== 'path') continue
-    const [c, r] = unkey(k)
-    for (const [dc, dr] of dirs) {
-      const nk = `${c + dc},${r + dr}`
-      if (claimedKeys.has(nk)) continue
-      const ty = tileType(world, c + dc, r + dr)
-      if (CLEARABLE.has(ty)) {
-        setTile(world, c + dc, r + dr, 'cleared')
-        revealAround(world, c + dc, r + dr, 1)
-        if (++cleared >= 2) break
+  outer: for (const p of world.parcels) {
+    if (!PARCEL_DEFS[p.type]?.clears) continue
+    if (p.state !== 'active' && p.state !== 'developing') continue
+    const reach = p.half + 3
+    for (let dc = -reach; dc <= reach; dc++) {
+      for (let dr = -reach; dr <= reach; dr++) {
+        const c = p.col + dc, r = p.row + dr
+        const k = `${c},${r}`
+        if (claimedKeys.has(k) || !world.revealedTiles.has(k)) continue
+        const ty = tileType(world, c, r)
+        if (!CLEARABLE.has(ty)) continue
+        setTile(world, c, r, 'cleared')
+        revealAround(world, c, r, 1)
+        if (++cleared >= 2) break outer
       }
-    }
-    if (cleared >= 2) break
-  }
-
-  // Pass 2: if nothing path-adjacent is left, clear any revealed unclaimed forest.
-  if (cleared === 0) {
-    for (const k of world.revealedTiles) {
-      if (claimedKeys.has(k)) continue
-      const t = world.tiles.get(k)
-      if (!t || !CLEARABLE.has(t.type)) continue
-      const [c, r] = unkey(k)
-      setTile(world, c, r, 'cleared')
-      revealAround(world, c, r, 1)
-      if (++cleared >= 2) break
     }
   }
 
   if (cleared === 0) return false
-
   world.bgDirty = true
   world.governor.lastPeacefulTick = world.tick
   world.governor.lastVisibleProjectTick = world.tick
-  world.governor.lastAction = cleared > 0 ? 'clearing ground in the settlement' : 'clearing near a path'
-  addEvent(world, 'A patch of forest was cleared within the settlement.')
+  world.governor.lastAction = 'clearing ground near the settlement'
+  addEvent(world, 'Unclaimed ground near the settlement was cleared.')
+  return true
+}
+
+// Protect a stand of trees by claiming it as a grove. The claim itself prevents
+// the clearing logic from touching those tiles. Governor plants groves when forest
+// coverage drops toward the minimum, or as a village-band beautification act.
+function tryPlantGrove(world) {
+  const groveCount = world.parcels.filter(p => p.type === 'grove').length
+  if (groveCount >= 3) return false
+  const site = findParcelSite(world, 'grove')
+  if (!site) return false
+  claimParcel(world, 'grove', site)
+  world.governor.lastAction = 'protecting a grove'
+  world.governor.lastVisibleProjectTick = world.tick
+  addEvent(world, 'A stand of trees was set aside as a protected grove.')
   return true
 }
 

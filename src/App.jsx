@@ -14,7 +14,7 @@ import { saveWorld, loadSave, restoreWorld, clearSave } from './engine/persist.j
 import { dist } from './engine/world.js'
 
 const SPEEDS = [1, 3, 10, 30, 100]
-const VERSION = '0.2.2'
+const VERSION = '0.2.3'
 const BUILD_TIME = new Date(__BUILD_TIME__).toLocaleString('en-GB', {
   day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit', hour12: false,
 })
@@ -430,6 +430,10 @@ export default function App() {
           `── Roads & Paths ────────────────────`,
           `trails ${trailCount}  paths ${pathCount}  roads ${roadCount}`,
           `connected: ${connectedCount}/${connectableParcels.length} parcels`,
+          ``,
+          `── Landscape ────────────────────────`,
+          `forest coverage: ${((world.forestCoverage ?? 1) * 100).toFixed(1)}%  (min ${(0.18*100).toFixed(0)}% grove threshold ${(0.26*100).toFixed(0)}%)`,
+          `groves: ${world.parcels.filter(p=>p.type==='grove').length}`,
           ``,
           `── Development Band ─────────────────`,
           `band: ${world.band}${world.band === 'settlement' ? '' : ' ✦'}`,

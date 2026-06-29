@@ -8,6 +8,7 @@ import {
   VILLAGE_BAND_MIN_POP, VILLAGE_BAND_MIN_DAY, VILLAGE_BAND_MIN_FIELDS,
   VILLAGE_BAND_MIN_STORAGE, VILLAGE_BAND_STABLE_TICKS, VILLAGE_BAND_CONFIDENCE,
   TRAFFIC_DECAY_RATE, TRAFFIC_DECAY_TICKS, TRAFFIC_TO_TRAIL,
+  FOREST_COVERAGE_MIN,
 } from './config.js'
 import { updateCitizens } from './citizens.js'
 import { regrowStumps } from './parcels.js'
@@ -52,6 +53,12 @@ export function tick(world) {
   // ── Autosave signal (set flag; actual save called from App.jsx) ───────────────
   if (world.tick % 600 === 0) world._autosaveDue = true
 
+  // ── Forest coverage: tracked for stewardship decisions and debug display ────────
+  if (world.tick % 300 === 0) updateForestCoverage(world)
+
+  // ── Wild regrowth: unclaimed cleared/bare land slowly regrows to grass ──────────
+  if (world.tick % 3000 === 0) wildRegrowth(world)
+
   // ── Traffic decay: footfall fades over time so paths worn out of use disappear ─
   if (world.tick % TRAFFIC_DECAY_TICKS === 0) decayTraffic(world)
 
@@ -60,6 +67,42 @@ export function tick(world) {
 
   // ── Bound memory for week/month-long runs: drop far, unrevealed, plain tiles ──
   if (world.tick % 2000 === 0) pruneTiles(world)
+}
+
+// ── Forest coverage ───────────────────────────────────────────────────────────
+// Ratio of forest tiles in the revealed area. Updated every 300 ticks.
+// The governor reads world.forestCoverage to decide whether to clear or plant groves.
+function updateForestCoverage(world) {
+  let forest = 0, total = 0
+  for (const [k, t] of world.tiles) {
+    if (!world.revealedTiles.has(k)) continue
+    const ty = t.type
+    if (ty === 'water' || ty === 'rock') continue
+    total++
+    if (ty === 'forest') forest++
+  }
+  world.forestCoverage = total > 0 ? forest / total : 1
+}
+
+// ── Wild regrowth ─────────────────────────────────────────────────────────────
+// Cleared tiles that don't belong to any parcel slowly regrow to grass.
+// This is the primary defence against permanent barren wasteland.
+function wildRegrowth(world) {
+  const claimedKeys = new Set()
+  for (const p of world.parcels)
+    for (const t of p.tiles) claimedKeys.add(key(t.col, t.row))
+
+  let grown = 0
+  for (const [k, t] of world.tiles) {
+    if (t.type !== 'cleared') continue
+    if (claimedKeys.has(k)) continue
+    // Coverage already very low → regrow faster (up to 8 per pass)
+    const cap = (world.forestCoverage || 1) < FOREST_COVERAGE_MIN ? 8 : 4
+    const i = k.indexOf(',')
+    setTile(world, +k.slice(0, i), +k.slice(i + 1), 'grass')
+    world.bgDirty = true
+    if (++grown >= cap) break
+  }
 }
 
 // ── Traffic decay ─────────────────────────────────────────────────────────────
